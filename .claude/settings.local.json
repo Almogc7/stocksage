@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(venv\\\\Scripts\\\\pip install *)",
+      "PowerShell(& \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\pip.exe\" install -r \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\stocksage\\\\requirements.txt\")",
+      "PowerShell(python --version; python -c \"import sys; print\\(sys.executable\\)\")",
+      "PowerShell(& \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" -m ensurepip --upgrade)",
+      "PowerShell(& \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" -m pip install -r \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\stocksage\\\\requirements.txt\")",
+      "PowerShell(& \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\stocksage\\\\test_fetch.py\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; & \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\stocksage\\\\test_fetch.py\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; & \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\stocksage\\\\main.py\")",
+      "PowerShell(& \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" -m pip install schedule -q)",
+      "PowerShell(& \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" -m pip install schedule)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; & \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\stocksage\\\\main.py\" 2>&1 | Select-Object -First 30)",
+      "PowerShell(& \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" -c \"import schedule; print\\(schedule.__version__\\)\")",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}

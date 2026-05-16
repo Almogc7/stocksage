@@ -1,0 +1,13 @@
+anthropic
+yfinance
+pandas
+numpy
+ta
+python-telegram-bot
+python-dotenv
+sqlalchemy
+requests
+textblob
+newsapi-python
+aiohttp
+schedule
