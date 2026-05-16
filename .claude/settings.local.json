@@ -14,7 +14,16 @@
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; & \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\stocksage\\\\main.py\" 2>&1 | Select-Object -First 30)",
       "PowerShell(& \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" -c \"import schedule; print\\(schedule.__version__\\)\")",
       "Bash(git init *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git remote *)",
+      "Bash(git branch *)",
+      "Bash(git push *)",
+      "PowerShell(& \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" -m pip install streamlit plotly -q)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; & \"C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe\" -c \"import dashboard\" 2>&1)",
+      "Bash('C:\\\\Users\\\\almog\\\\Desktop\\\\projects\\\\StockSage_V2\\\\venv\\\\Scripts\\\\python.exe' -c ' *)",
+      "Bash(./venv/Scripts/python.exe -c ' *)",
+      "Bash(./venv/Scripts/pip.exe install *)"
     ]
   }
 }

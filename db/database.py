@@ -107,6 +107,11 @@ def get_trades(symbol: str | None = None) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def delete_trade(trade_id: int) -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
+
+
 def get_trade_summary(symbol: str) -> dict:
     with _connect() as conn:
         rows = conn.execute(

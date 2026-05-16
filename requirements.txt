@@ -11,3 +11,5 @@ textblob
 newsapi-python
 aiohttp
 schedule
+streamlit
+plotly

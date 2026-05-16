@@ -76,18 +76,27 @@ def get_multiple_prices(symbols: list[str]) -> dict[str, dict | None]:
             today = df.iloc[-1]
             prev = df.iloc[-2]
 
-            price = float(today["Close"])
-            prev_close = float(prev["Close"])
+            def _f(x) -> float:
+                return float(x) if not pd.isna(x) else 0.0
+
+            price = _f(today["Close"])
+            prev_close = _f(prev["Close"])
             change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0.0
+
+            if price == 0 or pd.isna(price):
+                last_valid = df["Close"].dropna()
+                if not last_valid.empty:
+                    price = float(last_valid.iloc[-1])
+                change_pct = 0.0
 
             results[symbol] = {
                 "symbol": symbol,
                 "price": round(price, 4),
                 "change_pct": round(change_pct, 2),
-                "volume": int(today["Volume"]),
-                "high": round(float(today["High"]), 4),
-                "low": round(float(today["Low"]), 4),
-                "open": round(float(today["Open"]), 4),
+                "volume": int(today["Volume"]) if not pd.isna(today["Volume"]) else 0,
+                "high": round(_f(today["High"]), 4),
+                "low": round(_f(today["Low"]), 4),
+                "open": round(_f(today["Open"]), 4),
             }
         except Exception as e:
             print(f"[fetcher] Warning: could not parse data for {symbol}: {e}")
