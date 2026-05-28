@@ -151,6 +151,9 @@ WATCHLIST: dict[str, list[str]] = {
 #  הגדרות התראות
 # ─────────────────────────────────────────────
 
+# ציון מינימלי לשליחת התראה טכנית (BUY או STRONG BUY)
+ALERT_MIN_SCORE: int = 70
+
 # התראה אם מניה זזה יותר מ-X% ביום
 ALERT_THRESHOLD_PCT: float = 3.0
 

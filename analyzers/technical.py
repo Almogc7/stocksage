@@ -10,6 +10,64 @@ def _flatten(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ── Scoring helpers ───────────────────────────────────────────────────────────
+
+def _ema200(df: pd.DataFrame) -> float | None:
+    if len(df) < 200:
+        return None
+    return float(ta.trend.ema_indicator(df["close"], window=200).iloc[-1])
+
+
+def _macd_bullish_last3(df: pd.DataFrame) -> bool:
+    """True if a MACD bullish crossover occurred within the last 3 candles."""
+    macd_ind = ta.trend.MACD(df["close"])
+    macd_line = macd_ind.macd()
+    sig_line = macd_ind.macd_signal()
+    for i in range(3):
+        idx, prev = -(i + 1), -(i + 2)
+        try:
+            if macd_line.iloc[prev] <= sig_line.iloc[prev] and macd_line.iloc[idx] > sig_line.iloc[idx]:
+                return True
+        except IndexError:
+            break
+    return False
+
+
+def _volume_spike(df: pd.DataFrame, multiplier: float = 1.5, window: int = 20) -> bool:
+    """True if the most recent volume exceeds multiplier × 20-day average."""
+    if "volume" not in df.columns or len(df) < window + 1:
+        return False
+    avg_vol = float(df["volume"].iloc[-window - 1:-1].mean())
+    curr_vol = float(df["volume"].iloc[-1])
+    return avg_vol > 0 and curr_vol > multiplier * avg_vol
+
+
+def _stoch_rsi_bullish(df: pd.DataFrame) -> bool:
+    """%K crossed above %D from below 0.3 (≈30) in the most recent candle."""
+    try:
+        stoch = ta.momentum.StochRSIIndicator(df["close"])
+        k = stoch.stochrsi_k()
+        d = stoch.stochrsi_d()
+        k_now, k_prev = float(k.iloc[-1]), float(k.iloc[-2])
+        d_now, d_prev = float(d.iloc[-1]), float(d.iloc[-2])
+        return k_prev <= d_prev and k_now > d_now and k_prev < 0.3
+    except Exception:
+        return False
+
+
+def _vwap(df: pd.DataFrame, window: int = 20) -> float | None:
+    """Rolling VWAP over the last `window` periods; None if volume is absent."""
+    if "volume" not in df.columns:
+        return None
+    try:
+        series = ta.volume.VolumeWeightedAveragePrice(
+            df["high"], df["low"], df["close"], df["volume"], window=window
+        ).volume_weighted_average_price()
+        return float(series.iloc[-1])
+    except Exception:
+        return None
+
+
 # ── Indicators ────────────────────────────────────────────────────────────────
 
 def check_ema150(df: pd.DataFrame, current_price: float) -> dict:
@@ -184,82 +242,84 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
     df = _flatten(df)
 
     ema = check_ema150(df, current_price)
-    rsi = calc_rsi(df)
-    macd = calc_macd(df)
+    rsi_data = calc_rsi(df)
+    macd_data = calc_macd(df)
     bb = calc_bollinger(df)
     atr = calc_atr(df)
     pivots = calc_pivot_points(df)
     swings = calc_swing_levels(df)
 
-    buy_score = 0
-    sell_score = 0
+    score = 0
+    triggered: list[str] = []
 
-    if not ema["above_ema150"]:
-        recommendation = "NO_BUY - below EMA150"
-        return {
-            "symbol": symbol.upper(),
-            "current_price": current_price,
-            **ema, **rsi, **macd, **bb, **atr, **pivots, **swings,
-            "buy_score": 0,
-            "sell_score": sell_score,
-            "recommendation": recommendation,
-        }
+    # +15  price above EMA150
+    if ema["above_ema150"]:
+        score += 15
+        triggered.append("price_above_ema150")
 
-    if rsi["signal"] == "oversold":
-        buy_score += 25
-    elif rsi["signal"] == "overbought":
-        sell_score += 25
+    # +10  EMA150 > EMA200 (confirmed uptrend)
+    ema200_val = _ema200(df)
+    if ema200_val is not None and ema["ema150"] > ema200_val:
+        score += 10
+        triggered.append("ema150_above_ema200")
 
-    if macd["crossover"] == "bullish":
-        buy_score += 20
-    elif macd["crossover"] == "bearish":
-        sell_score += 20
+    # +20  MACD bullish crossover in last 3 candles
+    if _macd_bullish_last3(df):
+        score += 20
+        triggered.append("macd_bullish_crossover")
 
-    if bb["position"] in ("near_lower", "below_lower"):
-        buy_score += 15
-    elif bb["position"] in ("near_upper", "above_upper"):
-        sell_score += 15
+    # +15  RSI in healthy zone 40–65
+    if 40 <= rsi_data["rsi"] <= 65:
+        score += 15
+        triggered.append("rsi_healthy_range")
 
-    if current_price > pivots["pp"]:
-        buy_score += 10
+    # +15  volume spike > 1.5× 20-day average
+    if _volume_spike(df):
+        score += 15
+        triggered.append("volume_spike")
 
-    if atr["volatility"] == "high":
-        buy_score -= 10
-        sell_score -= 10
+    # +15  Stochastic RSI %K crosses above %D from below 30
+    if _stoch_rsi_bullish(df):
+        score += 15
+        triggered.append("stoch_rsi_bullish_cross")
 
-    if swings["nearest_support"] is not None:
-        pct_from_support = (current_price - swings["nearest_support"]) / current_price * 100
-        if pct_from_support <= 2:
-            buy_score += 10
+    # +10  price above rolling VWAP
+    vwap_val = _vwap(df)
+    if vwap_val is not None and current_price > vwap_val:
+        score += 10
+        triggered.append("above_vwap")
 
-    if swings["nearest_resistance"] is not None:
-        pct_from_resistance = (swings["nearest_resistance"] - current_price) / current_price * 100
-        if pct_from_resistance <= 2:
-            sell_score += 10
+    score = max(0, min(100, score))
 
-    buy_score = max(0, min(100, buy_score))
-    sell_score = max(0, min(100, sell_score))
-
-    if buy_score >= 70:
-        recommendation = "STRONG_BUY"
-    elif buy_score >= 50:
-        recommendation = "BUY"
-    elif buy_score >= 30:
-        recommendation = "WATCH"
+    if score >= 86:
+        verdict = "STRONG BUY"
+    elif score >= 71:
+        verdict = "BUY"
+    elif score >= 51:
+        verdict = "WEAK BUY"
+    elif score >= 31:
+        verdict = "WATCH"
     else:
-        recommendation = "NEUTRAL"
+        verdict = "AVOID"
+
+    stop_loss = round(current_price - 1.5 * atr["atr"], 4)
+    take_profit = round(current_price + 3.0 * atr["atr"], 4)
 
     return {
         "symbol": symbol.upper(),
         "current_price": current_price,
         **ema,
-        **rsi,
-        **macd,
+        **rsi_data,
+        **macd_data,
         **bb,
         **atr,
         **pivots,
         **swings,
-        "buy_score": buy_score,
-        "sell_score": sell_score,
-        "recommendation": recommendation,
+        "ema200": round(ema200_val, 4) if ema200_val is not None else None,
+        "vwap": round(vwap_val, 4) if vwap_val is not None else None,
+        "score": score,
+        "verdict": verdict,
+        "triggered_signals": triggered,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
     }

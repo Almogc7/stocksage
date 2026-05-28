@@ -36,12 +36,14 @@ def main():
     result = full_analysis(SYMBOL, df, current_price)
 
     sections = {
-        "Overview":     ["symbol", "current_price", "recommendation", "buy_score", "sell_score"],
-        "EMA":          ["ema150", "above_ema150", "pct_from_ema"],
+        "Overview":     ["symbol", "current_price", "score", "verdict", "triggered_signals"],
+        "Risk":         ["stop_loss", "take_profit"],
+        "EMA":          ["ema150", "ema200", "above_ema150", "pct_from_ema"],
         "RSI":          ["rsi", "signal"],
         "MACD":         ["macd", "signal_line", "histogram", "crossover"],
         "Bollinger":    ["upper", "middle", "lower", "position"],
-        "ATR":          ["atr", "atr_pct", "volatility", "stop_loss_1x", "stop_loss_15x", "take_profit_2x"],
+        "ATR":          ["atr", "atr_pct", "volatility"],
+        "VWAP":         ["vwap"],
         "Pivots":       ["pp", "r1", "r2", "r3", "s1", "s2", "s3"],
         "Swing Levels": ["nearest_resistance", "nearest_support", "swing_highs", "swing_lows"],
     }

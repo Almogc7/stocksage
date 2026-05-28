@@ -7,7 +7,7 @@ import schedule
 from telegram import Bot
 
 from analyzers.technical import full_analysis
-from config import ALERT_THRESHOLD_PCT, CHECK_INTERVAL_MINUTES, INDEX_ALERT_THRESHOLD_PCT
+from config import ALERT_MIN_SCORE, ALERT_THRESHOLD_PCT, CHECK_INTERVAL_MINUTES, INDEX_ALERT_THRESHOLD_PCT
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
 from db.database import get_today_alerts, get_watchlist, log_alert
 
@@ -16,11 +16,14 @@ _SEP = "━" * 13
 
 # ── Messaging ─────────────────────────────────────────────────────────────────
 
-async def send_alert(bot: Bot, chat_id: str, message: str) -> None:
+async def send_alert(bot: Bot, chat_id: str, message: str, symbol: str = "") -> None:
+    label = f" [{symbol}]" if symbol else ""
+    print(f"[ALERT FIRE]{label} Attempting Telegram send to chat_id={chat_id}")
     try:
         await bot.send_message(chat_id=chat_id, text=message)
+        print(f"[TELEGRAM OK]{label} Message delivered successfully")
     except Exception as e:
-        print(f"[agent] Failed to send alert: {e}")
+        print(f"[TELEGRAM ERROR]{label} {type(e).__name__}: {e}")
 
 
 # ── Duplicate guard ───────────────────────────────────────────────────────────
@@ -46,11 +49,11 @@ def _fmt_price_alert(symbol: str, change_pct: float, price: float, analysis: dic
         f"\U0001f4b0 מחיר: ${price:,.2f}\n\n"
         f"{_SEP}\n"
         f"\U0001f6a6 EMA150: {ema_status}\n"
-        f"\U0001f3af ציון קנייה: {analysis['buy_score']}/100\n"
-        f"\U0001f4a1 המלצה: {analysis['recommendation']}\n"
+        f"\U0001f3af ציון קנייה: {analysis['score']}/100\n"
+        f"\U0001f4a1 המלצה: {analysis['verdict']}\n"
         f"{_SEP}\n"
-        f"\U0001f6d1 Stop Loss: ${analysis['stop_loss_15x']:,.2f}\n"
-        f"\U0001f3af Take Profit: ${analysis['take_profit_2x']:,.2f}\n\n"
+        f"\U0001f6d1 Stop Loss: ${analysis['stop_loss']:,.2f}\n"
+        f"\U0001f3af Take Profit: ${analysis['take_profit']:,.2f}\n\n"
         f"/analyze {symbol} לניתוח מלא"
     )
 
@@ -70,11 +73,11 @@ def _fmt_technical_alert(symbol: str, alert_type: str, analysis: dict) -> str:
         f"\U0001f4c8 RSI: {analysis['rsi']}\n"
         f"\U0001f6a6 EMA150: {ema_status}\n\n"
         f"{_SEP}\n"
-        f"\U0001f3af ציון קנייה: {analysis['buy_score']}/100\n"
-        f"\U0001f4a1 המלצה: {analysis['recommendation']}\n"
+        f"\U0001f3af ציון קנייה: {analysis['score']}/100\n"
+        f"\U0001f4a1 המלצה: {analysis['verdict']}\n"
         f"{_SEP}\n"
-        f"\U0001f6d1 Stop Loss: ${analysis['stop_loss_15x']:,.2f}\n"
-        f"\U0001f3af Take Profit: ${analysis['take_profit_2x']:,.2f}\n\n"
+        f"\U0001f6d1 Stop Loss: ${analysis['stop_loss']:,.2f}\n"
+        f"\U0001f3af Take Profit: ${analysis['take_profit']:,.2f}\n\n"
         f"/analyze {symbol} לניתוח מלא"
     )
 
@@ -106,9 +109,10 @@ async def check_price_alerts(bot: Bot, chat_id: str) -> None:
             continue
 
         analysis = full_analysis(symbol, df, price_data["price"])
+        print(f"[ALERT CHECK] {symbol} price_change={change_pct:+.1f}% score={analysis['score']} threshold={ALERT_THRESHOLD_PCT}%")
         message = _fmt_price_alert(symbol, change_pct, price_data["price"], analysis)
 
-        await send_alert(bot, chat_id, message)
+        await send_alert(bot, chat_id, message, symbol=symbol)
         log_alert(symbol, alert_type, message)
         print(f"[agent] Price alert sent: {symbol} {change_pct:+.1f}%")
 
@@ -127,9 +131,10 @@ async def check_technical_alerts(bot: Bot, chat_id: str) -> None:
             continue
 
         analysis = full_analysis(symbol, df, price_data["price"])
+        print(f"[ALERT CHECK] {symbol} score={analysis['score']} verdict={analysis['verdict']} rsi={analysis['rsi']} threshold={ALERT_MIN_SCORE}")
 
         checks = []
-        if analysis["recommendation"] == "STRONG_BUY":
+        if analysis["score"] >= ALERT_MIN_SCORE:
             checks.append("STRONG_BUY")
         if analysis["rsi"] < 25:
             checks.append("RSI_OVERSOLD")
@@ -140,14 +145,16 @@ async def check_technical_alerts(bot: Bot, chat_id: str) -> None:
             if _already_alerted_today(symbol, alert_type):
                 continue
             message = _fmt_technical_alert(symbol, alert_type, analysis)
-            await send_alert(bot, chat_id, message)
+            await send_alert(bot, chat_id, message, symbol=symbol)
             log_alert(symbol, alert_type, message)
             print(f"[agent] Technical alert sent: {symbol} — {alert_type}")
 
 
 async def run_checks(bot: Bot, chat_id: str) -> None:
-    if not is_market_open():
-        print(f"[agent] {datetime.now().strftime('%H:%M:%S')} — market closed, skipping checks.")
+    market_open = is_market_open()
+    print(f"[agent] {datetime.now().strftime('%H:%M:%S')} — market_open={market_open}")
+    if not market_open:
+        print(f"[agent] Market closed (US 9:30–16:00 ET), skipping checks.")
         return
 
     print(f"[agent] {datetime.now().strftime('%H:%M:%S')} — running checks...")
@@ -159,10 +166,14 @@ async def run_checks(bot: Bot, chat_id: str) -> None:
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 
 def start_agent(token: str, chat_id: str) -> threading.Thread:
-    bot = Bot(token)
-
+    # Bot is created fresh inside each asyncio.run() so its httpx session
+    # is not orphaned when the event loop closes between scheduler ticks.
     def job() -> None:
-        asyncio.run(run_checks(bot, chat_id))
+        async def _run() -> None:
+            async with Bot(token) as bot:
+                await run_checks(bot, chat_id)
+
+        asyncio.run(_run())
 
     def loop() -> None:
         job()  # run immediately on startup

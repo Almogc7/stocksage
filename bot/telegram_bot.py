@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -46,19 +48,23 @@ def _bb_label(position: str) -> str:
     }.get(position, position)
 
 
-def _rec_emoji(rec: str) -> str:
+def _rec_emoji(verdict: str) -> str:
     return {
-        "STRONG_BUY": "\U0001f7e2",
+        "STRONG BUY": "\U0001f7e2",
         "BUY":        "\U0001f7e1",
-        "WATCH":      "\U0001f7e0",
-        "NEUTRAL":    "⚪",
-    }.get(rec.split(" ")[0], "⚪")
+        "WEAK BUY":   "\U0001f7e0",
+        "WATCH":      "⚪",
+        "AVOID":      "\U0001f534",
+    }.get(verdict, "⚪")
 
 
 def _fmt_analysis(analysis: dict) -> str:
     sym = analysis["symbol"]
     price = analysis["current_price"]
-    rec = analysis["recommendation"]
+    verdict = analysis["verdict"]
+
+    triggered = analysis.get("triggered_signals", [])
+    signals_str = "  •  ".join(triggered) if triggered else "—"
 
     lines = [
         f"\U0001f4ca ניתוח {sym} — ${price:,.2f}",
@@ -69,12 +75,13 @@ def _fmt_analysis(analysis: dict) -> str:
         f"\U0001f4c9 MACD: {_macd_label(analysis['crossover'])}",
         f"\U0001f4ca Bollinger: {_bb_label(analysis['position'])}",
         _sep(),
-        f"\U0001f3af ציון קנייה: {analysis['buy_score']}/100",
-        f"\U0001f4a1 המלצה: {_rec_emoji(rec)} {rec}",
+        f"\U0001f3af ציון: {analysis['score']}/100",
+        f"\U0001f4a1 המלצה: {_rec_emoji(verdict)} {verdict}",
+        f"✅ איתותים: {signals_str}",
         _sep(),
         f"ATR: ${analysis['atr']:,.2f} ({analysis['atr_pct']}%)",
-        f"\U0001f6d1 Stop Loss: ${analysis['stop_loss_15x']:,.2f}",
-        f"\U0001f3af Take Profit: ${analysis['take_profit_2x']:,.2f}",
+        f"\U0001f6d1 Stop Loss: ${analysis['stop_loss']:,.2f}",
+        f"\U0001f3af Take Profit: ${analysis['take_profit']:,.2f}",
     ]
     return "\n".join(lines)
 
@@ -287,6 +294,12 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _send(update, "\n".join(lines).strip())
 
 
+async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = f"✅ StockSage bot is alive — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    print(f"[TELEGRAM OK] /test command confirmed delivery to chat_id={update.effective_chat.id}")
+    await _send(update, text)
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     open_ = is_market_open()
     status_line = "\U0001f7e2 השוק פתוח" if open_ else "\U0001f534 השוק סגור"
@@ -316,6 +329,7 @@ def run_bot(token: str) -> None:
     app = ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("test",      cmd_test))
     app.add_handler(CommandHandler("analyze",   cmd_analyze))
     app.add_handler(CommandHandler("add",       cmd_add))
     app.add_handler(CommandHandler("remove",    cmd_remove))

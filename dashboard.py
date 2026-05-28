@@ -139,21 +139,26 @@ with tab2:
 
             with col2:
                 st.markdown("**ציון והמלצה**")
-                st.progress(analysis["buy_score"] / 100, text=f"ציון קנייה: {analysis['buy_score']}/100")
+                st.progress(analysis["score"] / 100, text=f"ציון קנייה: {analysis['score']}/100")
 
-                rec = analysis["recommendation"]
+                verdict = analysis["verdict"]
                 rec_color = {
-                    "STRONG_BUY": "🟢",
+                    "STRONG BUY": "🟢",
                     "BUY":        "🟡",
-                    "WATCH":      "🟠",
-                    "NEUTRAL":    "⚪",
-                }.get(rec.split()[0], "⚪")
-                st.markdown(f"### {rec_color} {rec}")
+                    "WEAK BUY":   "🟠",
+                    "WATCH":      "⚪",
+                    "AVOID":      "🔴",
+                }.get(verdict, "⚪")
+                st.markdown(f"### {rec_color} {verdict}")
+
+                triggered = analysis.get("triggered_signals", [])
+                if triggered:
+                    st.caption("איתותים: " + " | ".join(triggered))
 
                 st.divider()
                 st.metric("ATR", f"${analysis['atr']:,.2f}", delta=f"{analysis['atr_pct']}% | {analysis['volatility']}")
-                st.metric("🛑 Stop Loss (1.5×)", f"${analysis['stop_loss_15x']:,.2f}")
-                st.metric("🎯 Take Profit (2×)", f"${analysis['take_profit_2x']:,.2f}")
+                st.metric("🛑 Stop Loss (1.5×)", f"${analysis['stop_loss']:,.2f}")
+                st.metric("🎯 Take Profit (3×)", f"${analysis['take_profit']:,.2f}")
 
             with col3:
                 chart_type = st.radio(
