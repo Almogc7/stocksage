@@ -12,6 +12,7 @@ from config import (
     ALERT_COOLDOWN_HOURS,
     ALERT_MIN_PRICE_CHANGE,
     ALERT_MIN_SCORE,
+    ALERT_REQUIRE_GREEN_CANDLE,
     ALERT_RSI_MAX,
     ALERT_RSI_MIN,
     ALERT_VERDICTS,
@@ -237,13 +238,17 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
         if df is None:
             continue
 
-        analysis = full_analysis(symbol, df, price_data["price"])
+        analysis  = full_analysis(symbol, df, price_data["price"])
         score     = analysis["score"]
         verdict   = analysis["verdict"]
         rsi       = analysis["rsi"]
         above_ema = analysis["above_ema150"]
         triggered = analysis.get("triggered_signals", [])
         has_vol   = "volume_spike" in triggered
+
+        # Candle data reused from df — no extra fetch
+        last_close = float(df["close"].iloc[-1])
+        last_open  = float(df["open"].iloc[-1])
 
         # Gate 5: price above EMA150
         if not above_ema:
@@ -266,6 +271,12 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
         # Gate 8: composite score + verdict
         if score < ALERT_MIN_SCORE or verdict not in ALERT_VERDICTS:
             print(f"[ALERT SKIP] {symbol} — score={score} verdict={verdict} below threshold")
+            continue
+
+        # Gate 9: last candle must be green (momentum confirmation)
+        last_candle_green = last_close > last_open
+        if ALERT_REQUIRE_GREEN_CANDLE and not last_candle_green:
+            print(f"[ALERT SKIP] {symbol} — last candle red, momentum fading")
             continue
 
         # All 9 gates passed → fire

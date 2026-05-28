@@ -167,6 +167,9 @@ ALERT_MIN_PRICE_CHANGE: float = 0.5
 ALERT_RSI_MIN: int = 45
 ALERT_RSI_MAX: int = 68
 
+# אישור מומנטום — נר אחרון חייב להיות ירוק (close > open)
+ALERT_REQUIRE_GREEN_CANDLE: bool = True
+
 # ─────────────────────────────────────────────
 #  סריקת בוקר
 # ─────────────────────────────────────────────
