@@ -27,6 +27,15 @@ _IL_TZ = ZoneInfo("Asia/Jerusalem")
 
 _SEP = "━" * 13
 
+# In-memory dedup guard: "SYMBOL_YYYY-MM-DD" → "HH:MM when alerted"
+# Prevents duplicates within the same process even if the DB write hasn't
+# become visible to a new connection yet (sqlite3 transaction isolation gap).
+_alerted_this_session: dict[str, str] = {}
+
+
+def _session_key(symbol: str) -> str:
+    return f"{symbol.upper()}_{datetime.now().strftime('%Y-%m-%d')}"
+
 
 # ── Messaging ─────────────────────────────────────────────────────────────────
 
@@ -222,11 +231,20 @@ async def check_price_alerts(bot: Bot, chat_id: str) -> None:
         if abs(change_pct) < ALERT_THRESHOLD_PCT:
             continue
 
-        # Cooldown: skip if this symbol was alerted in the last N hours
-        if _in_cooldown(symbol):
-            print(f"[ALERT SKIP] {symbol} in cooldown ({ALERT_COOLDOWN_HOURS}h)")
+        # 1. In-memory check — instant, catches same-cycle duplicates before
+        #    any expensive work or DB access.
+        key = _session_key(symbol)
+        if key in _alerted_this_session:
+            print(f"[DUPLICATE SKIP] {symbol} — already alerted at {_alerted_this_session[key]}, cooldown {ALERT_COOLDOWN_HOURS}h")
             continue
 
+        # 2. DB cooldown check — persists across restarts, avoids re-alerting
+        #    after bot restart within the cooldown window.
+        if _in_cooldown(symbol):
+            print(f"[ALERT SKIP] {symbol} in cooldown ({ALERT_COOLDOWN_HOURS}h) — skipping expensive compute")
+            continue
+
+        # 3. Expensive compute only if both guards passed.
         df = get_historical(symbol, period="1y")
         if df is None:
             continue
@@ -236,14 +254,20 @@ async def check_price_alerts(bot: Bot, chat_id: str) -> None:
         verdict = analysis["verdict"]
         print(f"[ALERT CHECK] {symbol} price_change={change_pct:+.1f}% score={score} verdict={verdict}")
 
-        # Price move is necessary but NOT sufficient — must also pass score+verdict gate
+        # 4. Score + verdict gate — price move alone is not enough.
         if score < ALERT_MIN_SCORE or verdict not in ALERT_VERDICTS:
             print(f"[ALERT SKIP] {symbol} score={score} verdict={verdict} — does not meet BUY threshold")
             continue
 
         alert_type = "PRICE_UP" if change_pct >= 0 else "PRICE_DOWN"
-        message = _fmt_price_alert(symbol, change_pct, price_data["price"], analysis)
+        message    = _fmt_price_alert(symbol, change_pct, price_data["price"], analysis)
+
+        # 5. Send
         await send_alert(bot, chat_id, message, symbol=symbol)
+
+        # 6. Mark in-memory FIRST, then DB — so the next symbol in this same
+        #    loop iteration sees the guard even before the DB commit settles.
+        _alerted_this_session[key] = datetime.now().strftime("%H:%M")
         log_alert(symbol, alert_type, message)
         print(f"[agent] Price alert sent: {symbol} {change_pct:+.1f}% score={score}")
 
@@ -267,24 +291,30 @@ async def check_technical_alerts(bot: Bot, chat_id: str) -> None:
         rsi     = analysis["rsi"]
         print(f"[ALERT CHECK] {symbol} score={score} verdict={verdict} rsi={rsi} min={ALERT_MIN_SCORE}")
 
-        # Both conditions must pass the score+verdict gate before any alert fires
-        qualifies = score >= ALERT_MIN_SCORE and verdict in ALERT_VERDICTS
-
-        if not qualifies:
+        # 1. Score + verdict gate
+        if score < ALERT_MIN_SCORE or verdict not in ALERT_VERDICTS:
             continue
 
-        # Cooldown: one alert per symbol per N hours regardless of alert_type
+        # 2. In-memory check — catches the case where check_price_alerts
+        #    already fired for this symbol earlier in the same run_checks() cycle.
+        key = _session_key(symbol)
+        if key in _alerted_this_session:
+            print(f"[DUPLICATE SKIP] {symbol} — already alerted at {_alerted_this_session[key]}, cooldown {ALERT_COOLDOWN_HOURS}h")
+            continue
+
+        # 3. DB cooldown check
         if _in_cooldown(symbol):
             print(f"[ALERT SKIP] {symbol} in cooldown ({ALERT_COOLDOWN_HOURS}h)")
             continue
 
-        alert_type = "STRONG_BUY"
-        # Prefer the more specific RSI_OVERSOLD label when RSI is extreme
-        if rsi < 25:
-            alert_type = "RSI_OVERSOLD"
+        alert_type = "RSI_OVERSOLD" if rsi < 25 else "STRONG_BUY"
+        message    = _fmt_technical_alert(symbol, alert_type, analysis)
 
-        message = _fmt_technical_alert(symbol, alert_type, analysis)
+        # 4. Send
         await send_alert(bot, chat_id, message, symbol=symbol)
+
+        # 5. Mark in-memory first, then DB
+        _alerted_this_session[key] = datetime.now().strftime("%H:%M")
         log_alert(symbol, alert_type, message)
         print(f"[agent] Technical alert sent: {symbol} — {alert_type} score={score}")
 
