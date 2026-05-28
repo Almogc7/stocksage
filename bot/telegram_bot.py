@@ -4,6 +4,7 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+from agent.core import run_morning_scan
 from analyzers.technical import full_analysis
 from config import ALERT_THRESHOLD_PCT, CATEGORIES, WATCHLIST
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
@@ -100,6 +101,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "\U0001f4ca ברוך הבא ל-StockSage!\n\n"
         "הנה הפקודות הזמינות:\n\n"
+        "/scan — סריקת בוקר ידנית (Top 5 מניות לפי ציון)\n"
         "/analyze <SYMBOL> — ניתוח טכני מלא\n"
         "/add <SYMBOL> <CATEGORY> — הוספה ל-Watchlist\n"
         "/remove <SYMBOL> — הסרה מה-Watchlist\n"
@@ -294,6 +296,12 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _send(update, "\n".join(lines).strip())
 
 
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _send(update, "\U0001f305 מריץ סריקת מניות — זה יכול לקחת כמה דקות...")
+    chat_id = str(update.effective_chat.id)
+    await run_morning_scan(context.bot, chat_id)
+
+
 async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = f"✅ StockSage bot is alive — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     print(f"[TELEGRAM OK] /test command confirmed delivery to chat_id={update.effective_chat.id}")
@@ -329,6 +337,7 @@ def run_bot(token: str) -> None:
     app = ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("scan",      cmd_scan))
     app.add_handler(CommandHandler("test",      cmd_test))
     app.add_handler(CommandHandler("analyze",   cmd_analyze))
     app.add_handler(CommandHandler("add",       cmd_add))

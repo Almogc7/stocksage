@@ -2,14 +2,26 @@ import asyncio
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import schedule
 from telegram import Bot
 
 from analyzers.technical import full_analysis
-from config import ALERT_MIN_SCORE, ALERT_THRESHOLD_PCT, CHECK_INTERVAL_MINUTES, INDEX_ALERT_THRESHOLD_PCT
+from config import (
+    ALERT_MIN_SCORE,
+    ALERT_THRESHOLD_PCT,
+    CHECK_INTERVAL_MINUTES,
+    INDEX_ALERT_THRESHOLD_PCT,
+    MARKET_OPEN_HOUR_IL,
+    MARKET_OPEN_MIN_IL,
+    SCAN_MIN_SCORE,
+    SCAN_TOP_N,
+)
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
 from db.database import get_today_alerts, get_watchlist, log_alert
+
+_IL_TZ = ZoneInfo("Asia/Jerusalem")
 
 _SEP = "━" * 13
 
@@ -80,6 +92,100 @@ def _fmt_technical_alert(symbol: str, alert_type: str, analysis: dict) -> str:
         f"\U0001f3af Take Profit: ${analysis['take_profit']:,.2f}\n\n"
         f"/analyze {symbol} לניתוח מלא"
     )
+
+
+# ── Morning scan ──────────────────────────────────────────────────────────────
+
+_SIGNAL_LABELS: dict[str, str] = {
+    "price_above_ema150":     "EMA trend",
+    "ema150_above_ema200":    "EMA200 uptrend",
+    "macd_bullish_crossover": "MACD cross",
+    "rsi_healthy_range":      "RSI healthy",
+    "volume_spike":           "Volume spike",
+    "stoch_rsi_bullish_cross": "Stoch RSI",
+    "above_vwap":             "VWAP",
+}
+
+_MEDALS = ["\U0001f947", "\U0001f948", "\U0001f949"]  # 🥇 🥈 🥉
+_SCAN_SEP = "━" * 19
+
+
+def _fmt_morning_scan(results: list[dict]) -> str:
+    now = datetime.now(_IL_TZ)
+    time_str = now.strftime("%H:%M")
+
+    lines = [
+        "\U0001f305 סריקת בוקר — StockSage",
+        _SCAN_SEP,
+        f"\U0001f551 {time_str} | שוק פתוח",
+        "",
+    ]
+
+    for i, r in enumerate(results):
+        medal = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
+        signals = [_SIGNAL_LABELS.get(s, s) for s in r.get("triggered_signals", [])]
+        signals_str = "  ".join(f"✅ {s}" for s in signals) if signals else "—"
+
+        lines.append(f"{medal} {r['symbol']} — {r['verdict']} [{r['score']}/100]")
+        lines.append(f"   {signals_str}")
+        lines.append(f"   \U0001f6d1 Stop: ${r['stop_loss']:,.2f} | \U0001f3af TP: ${r['take_profit']:,.2f}")
+        lines.append("")
+
+    lines.append(_SCAN_SEP)
+    lines.append("\U0001f4a1 /analyze SYMBOL לניתוח מלא")
+    return "\n".join(lines)
+
+
+async def send_morning_scan(bot: Bot, chat_id: str, results: list[dict]) -> None:
+    if not results:
+        message = "\U0001f305 סריקת בוקר — אין מניות עם ציון ≥ 50 כרגע."
+    else:
+        message = _fmt_morning_scan(results)
+    print(f"[SCAN] Sending morning scan ({len(results)} results) to chat_id={chat_id}")
+    try:
+        await bot.send_message(chat_id=chat_id, text=message)
+        print(f"[SCAN OK] Morning scan delivered")
+    except Exception as e:
+        print(f"[SCAN ERROR] {type(e).__name__}: {e}")
+
+
+_SCAN_SKIP_CATEGORIES = {"מדדים", "ETFs"}
+
+
+async def run_morning_scan(bot: Bot, chat_id: str) -> None:
+    print(f"[SCAN] Starting morning scan across watchlist...")
+    wl = get_watchlist()
+
+    # Build eligible symbol list: skip index/ETF categories and ^ tickers
+    eligible = [
+        s
+        for cat, symbols in wl.items()
+        if cat not in _SCAN_SKIP_CATEGORIES
+        for s in symbols
+        if not s.startswith("^")
+    ]
+    print(f"[SCAN] {len(eligible)} eligible symbols after filtering indices/ETFs")
+
+    results: list[dict] = []
+    for symbol in eligible:
+        try:
+            df = get_historical(symbol, period="1y")
+            if df is None:
+                continue
+            price_data = get_current_price(symbol)
+            if not price_data:
+                continue
+            analysis = full_analysis(symbol, df, price_data["price"])
+            if analysis["score"] >= SCAN_MIN_SCORE:
+                results.append(analysis)
+        except Exception as e:
+            print(f"[SCAN SKIP] {symbol}: {type(e).__name__}: {e}")
+            continue
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    top = results[:SCAN_TOP_N]
+    print(f"[SCAN] {len(results)} qualifying symbols found, sending top {len(top)}")
+    await send_morning_scan(bot, chat_id, top)
 
 
 # ── Check routines ────────────────────────────────────────────────────────────
@@ -172,14 +278,32 @@ def start_agent(token: str, chat_id: str) -> threading.Thread:
         async def _run() -> None:
             async with Bot(token) as bot:
                 await run_checks(bot, chat_id)
-
         asyncio.run(_run())
 
+    def morning_job() -> None:
+        async def _run() -> None:
+            async with Bot(token) as bot:
+                await run_morning_scan(bot, chat_id)
+        asyncio.run(_run())
+
+    def _is_morning_scan_time(last_scan_date) -> bool:
+        """True once per weekday when Israel time enters the 16:35 minute."""
+        now = datetime.now(_IL_TZ)
+        if now.weekday() >= 5:          # Sat=5, Sun=6
+            return False
+        if last_scan_date == now.date():  # already fired today
+            return False
+        return now.hour == MARKET_OPEN_HOUR_IL and now.minute >= MARKET_OPEN_MIN_IL
+
     def loop() -> None:
-        job()  # run immediately on startup
+        last_scan_date = None
+        job()  # run price/technical checks immediately on startup
         schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(job)
         while True:
             schedule.run_pending()
+            if _is_morning_scan_time(last_scan_date):
+                last_scan_date = datetime.now(_IL_TZ).date()
+                morning_job()
             time.sleep(60)
 
     thread = threading.Thread(target=loop, daemon=True)
