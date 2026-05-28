@@ -39,6 +39,11 @@ def init_db(watchlist: dict | None = None) -> None:
                 message      TEXT NOT NULL,
                 triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                chat_id   TEXT PRIMARY KEY,
+                language  TEXT DEFAULT 'he'
+            );
         """)
     if watchlist:
         populate_from_config(watchlist)
@@ -151,6 +156,26 @@ def log_alert(symbol: str, alert_type: str, message: str) -> None:
         conn.execute(
             "INSERT INTO alerts (symbol, alert_type, message) VALUES (?, ?, ?)",
             (symbol.upper(), alert_type, message),
+        )
+
+
+# ── User preferences ─────────────────────────────────────────────────────────
+
+def get_language(chat_id: str) -> str:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT language FROM user_preferences WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+    return row["language"] if row else "he"
+
+
+def set_language(chat_id: str, lang: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO user_preferences (chat_id, language) VALUES (?, ?)"
+            " ON CONFLICT(chat_id) DO UPDATE SET language = excluded.language",
+            (chat_id, lang),
         )
 
 

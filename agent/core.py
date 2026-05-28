@@ -19,7 +19,7 @@ from config import (
     SCAN_TOP_N,
 )
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
-from db.database import get_today_alerts, get_watchlist, log_alert
+from db.database import get_language, get_today_alerts, get_watchlist, log_alert
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
 
@@ -96,6 +96,21 @@ def _fmt_technical_alert(symbol: str, alert_type: str, analysis: dict) -> str:
 
 # ── Morning scan ──────────────────────────────────────────────────────────────
 
+_SCAN_STRINGS: dict[str, dict[str, str]] = {
+    "he": {
+        "title":        "\U0001f305 סריקת בוקר — StockSage",
+        "market_open":  "שוק פתוח",
+        "full_analysis": "לניתוח מלא",
+        "no_results":   "אין מניות עם ציון ≥ 50 כרגע.",
+    },
+    "en": {
+        "title":        "\U0001f305 Morning Scan — StockSage",
+        "market_open":  "Market Open",
+        "full_analysis": "Full analysis",
+        "no_results":   "No stocks found with score ≥ 50 right now.",
+    },
+}
+
 _SIGNAL_LABELS: dict[str, str] = {
     "price_above_ema150":     "EMA trend",
     "ema150_above_ema200":    "EMA200 uptrend",
@@ -110,14 +125,15 @@ _MEDALS = ["\U0001f947", "\U0001f948", "\U0001f949"]  # 🥇 🥈 🥉
 _SCAN_SEP = "━" * 19
 
 
-def _fmt_morning_scan(results: list[dict]) -> str:
+def _fmt_morning_scan(results: list[dict], lang: str = "he") -> str:
+    ss = _SCAN_STRINGS[lang]
     now = datetime.now(_IL_TZ)
     time_str = now.strftime("%H:%M")
 
     lines = [
-        "\U0001f305 סריקת בוקר — StockSage",
+        ss["title"],
         _SCAN_SEP,
-        f"\U0001f551 {time_str} | שוק פתוח",
+        f"\U0001f551 {time_str} | {ss['market_open']}",
         "",
     ]
 
@@ -132,15 +148,15 @@ def _fmt_morning_scan(results: list[dict]) -> str:
         lines.append("")
 
     lines.append(_SCAN_SEP)
-    lines.append("\U0001f4a1 /analyze SYMBOL לניתוח מלא")
+    lines.append(f"\U0001f4a1 /analyze SYMBOL {ss['full_analysis']}")
     return "\n".join(lines)
 
 
-async def send_morning_scan(bot: Bot, chat_id: str, results: list[dict]) -> None:
+async def send_morning_scan(bot: Bot, chat_id: str, results: list[dict], lang: str = "he") -> None:
     if not results:
-        message = "\U0001f305 סריקת בוקר — אין מניות עם ציון ≥ 50 כרגע."
+        message = f"\U0001f305 {_SCAN_STRINGS[lang]['no_results']}"
     else:
-        message = _fmt_morning_scan(results)
+        message = _fmt_morning_scan(results, lang)
     print(f"[SCAN] Sending morning scan ({len(results)} results) to chat_id={chat_id}")
     try:
         await bot.send_message(chat_id=chat_id, text=message)
@@ -184,8 +200,9 @@ async def run_morning_scan(bot: Bot, chat_id: str) -> None:
 
     results.sort(key=lambda x: x["score"], reverse=True)
     top = results[:SCAN_TOP_N]
-    print(f"[SCAN] {len(results)} qualifying symbols found, sending top {len(top)}")
-    await send_morning_scan(bot, chat_id, top)
+    lang = get_language(chat_id)
+    print(f"[SCAN] {len(results)} qualifying symbols found, sending top {len(top)} (lang={lang})")
+    await send_morning_scan(bot, chat_id, top, lang=lang)
 
 
 # ── Check routines ────────────────────────────────────────────────────────────
