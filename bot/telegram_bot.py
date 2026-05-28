@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -296,6 +296,35 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _send(update, "\n".join(lines).strip())
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sep = "━" * 19
+    text = (
+        f"\U0001f916 StockSage — פקודות זמינות\n"
+        f"{sep}\n"
+        f"\U0001f4ca ניתוח\n"
+        f"/analyze SYMBOL — ניתוח טכני מלא\n"
+        f"/scan — סריקת מניות חמות עכשיו\n"
+        f"\n"
+        f"\U0001f4cb Watchlist\n"
+        f"/watchlist — הצג את כל המניות\n"
+        f"/add SYMBOL CATEGORY — הוסף מניה\n"
+        f"/remove SYMBOL — הסר מניה\n"
+        f"\n"
+        f"\U0001f4bc עסקאות\n"
+        f"/trade BUY|SELL SYMBOL QTY PRICE — תעד עסקה\n"
+        f"/trades SYMBOL — היסטוריית עסקאות\n"
+        f"/summary SYMBOL — סיכום פוזיציה\n"
+        f"\n"
+        f"\U00002699️ כלים\n"
+        f"/alerts — התראות היום\n"
+        f"/status — סטטוס שוק\n"
+        f"/test — בדיקת חיבור Bot\n"
+        f"/help — הצג תפריט זה\n"
+        f"{sep}"
+    )
+    await _send(update, text)
+
+
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _send(update, "\U0001f305 מריץ סריקת מניות — זה יכול לקחת כמה דקות...")
     chat_id = str(update.effective_chat.id)
@@ -331,12 +360,32 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 # ── Bot runner ────────────────────────────────────────────────────────────────
 
+_BOT_COMMANDS = [
+    BotCommand("analyze",   "ניתוח טכני מלא"),
+    BotCommand("scan",      "סריקת מניות חמות"),
+    BotCommand("watchlist", "הצג את כל המניות"),
+    BotCommand("add",       "הוסף מניה לרשימה"),
+    BotCommand("remove",    "הסר מניה"),
+    BotCommand("trade",     "תעד עסקה"),
+    BotCommand("trades",    "היסטוריית עסקאות"),
+    BotCommand("summary",   "סיכום פוזיציה"),
+    BotCommand("alerts",    "התראות היום"),
+    BotCommand("status",    "סטטוס שוק"),
+    BotCommand("test",      "בדיקת חיבור"),
+    BotCommand("help",      "תפריט פקודות"),
+]
+
+
 def run_bot(token: str) -> None:
     init_db(WATCHLIST)
 
-    app = ApplicationBuilder().token(token).build()
+    async def post_init(application) -> None:
+        await application.bot.set_my_commands(_BOT_COMMANDS)
+
+    app = ApplicationBuilder().token(token).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("help",      cmd_help))
     app.add_handler(CommandHandler("scan",      cmd_scan))
     app.add_handler(CommandHandler("test",      cmd_test))
     app.add_handler(CommandHandler("analyze",   cmd_analyze))
