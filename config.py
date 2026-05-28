@@ -151,14 +151,21 @@ WATCHLIST: dict[str, list[str]] = {
 #  הגדרות התראות
 # ─────────────────────────────────────────────
 
-# ציון מינימלי לשליחת התראה טכנית (BUY או STRONG BUY)
-ALERT_MIN_SCORE: int = 70
+# ציון מינימלי לשליחת התראה (swing trading — BUY ומעלה)
+ALERT_MIN_SCORE: int = 65
 
 # שעות המתנה בין התראות על אותה מניה
-ALERT_COOLDOWN_HOURS: int = 4
+ALERT_COOLDOWN_HOURS: int = 2
 
 # רק verdict אלה יגרמו לשליחת התראה
 ALERT_VERDICTS: list[str] = ["BUY", "STRONG BUY"]
+
+# שינוי מחיר מינימלי (חיובי בלבד — רק BUY)
+ALERT_MIN_PRICE_CHANGE: float = 0.5
+
+# טווח RSI תקין לאיתות קנייה (לא מהול מדי / לא מכרז מדי)
+ALERT_RSI_MIN: int = 45
+ALERT_RSI_MAX: int = 68
 
 # ─────────────────────────────────────────────
 #  סריקת בוקר

@@ -10,11 +10,12 @@ from telegram import Bot
 from analyzers.technical import full_analysis
 from config import (
     ALERT_COOLDOWN_HOURS,
+    ALERT_MIN_PRICE_CHANGE,
     ALERT_MIN_SCORE,
-    ALERT_THRESHOLD_PCT,
+    ALERT_RSI_MAX,
+    ALERT_RSI_MIN,
     ALERT_VERDICTS,
     CHECK_INTERVAL_MINUTES,
-    INDEX_ALERT_THRESHOLD_PCT,
     MARKET_OPEN_HOUR_IL,
     MARKET_OPEN_MIN_IL,
     SCAN_MIN_SCORE,
@@ -56,49 +57,34 @@ def _in_cooldown(symbol: str) -> bool:
     return was_alerted_recently(symbol, hours=ALERT_COOLDOWN_HOURS)
 
 
-# ── Alert formatters ──────────────────────────────────────────────────────────
+# ── Alert formatter ───────────────────────────────────────────────────────────
 
-def _fmt_price_alert(symbol: str, change_pct: float, price: float, analysis: dict) -> str:
-    direction = "\U0001f4c8" if change_pct >= 0 else "\U0001f4c9"
-    sign = "+" if change_pct >= 0 else ""
-    ema_status = "פתוח ✅" if analysis["above_ema150"] else "סגור ❌"
-
-    return (
-        f"\U0001f6a8 התראת מחיר — {symbol}\n\n"
-        f"{direction} שינוי: {sign}{change_pct:.1f}%\n"
-        f"\U0001f4b0 מחיר: ${price:,.2f}\n\n"
-        f"{_SEP}\n"
-        f"\U0001f6a6 EMA150: {ema_status}\n"
-        f"\U0001f3af ציון קנייה: {analysis['score']}/100\n"
-        f"\U0001f4a1 המלצה: {analysis['verdict']}\n"
-        f"{_SEP}\n"
-        f"\U0001f6d1 Stop Loss: ${analysis['stop_loss']:,.2f}\n"
-        f"\U0001f3af Take Profit: ${analysis['take_profit']:,.2f}\n\n"
-        f"/analyze {symbol} לניתוח מלא"
-    )
+_ALERT_SEP = "━" * 19
 
 
-def _fmt_technical_alert(symbol: str, alert_type: str, analysis: dict) -> str:
-    titles = {
-        "STRONG_BUY":  f"\U0001f7e2 איתות קנייה חזק — {symbol}",
-        "RSI_OVERSOLD": f"\U0001f4ca RSI מכירת יתר — {symbol}",
-        "RSI_OVERBOUGHT": f"\U0001f4ca RSI קנייה יתר — {symbol}",
-    }
-    title = titles.get(alert_type, f"התראה טכנית — {symbol}")
-    ema_status = "פתוח ✅" if analysis["above_ema150"] else "סגור ❌"
+def _fmt_buy_alert(symbol: str, change_pct: float, price: float, analysis: dict) -> str:
+    score   = analysis["score"]
+    verdict = analysis["verdict"]
+    rsi     = analysis["rsi"]
+    sign    = "+" if change_pct >= 0 else ""
+
+    triggered    = analysis.get("triggered_signals", [])
+    signal_names = [_SIGNAL_LABELS.get(s, s) for s in triggered]
+    signals_str  = "  ".join(f"✅ {n}" for n in signal_names) if signal_names else "—"
+
+    vol_tag = "✅" if "volume_spike" in triggered else "❌"
 
     return (
-        f"{title}\n\n"
-        f"\U0001f4b0 מחיר: ${analysis['current_price']:,.2f}\n"
-        f"\U0001f4c8 RSI: {analysis['rsi']}\n"
-        f"\U0001f6a6 EMA150: {ema_status}\n\n"
-        f"{_SEP}\n"
-        f"\U0001f3af ציון קנייה: {analysis['score']}/100\n"
-        f"\U0001f4a1 המלצה: {analysis['verdict']}\n"
-        f"{_SEP}\n"
-        f"\U0001f6d1 Stop Loss: ${analysis['stop_loss']:,.2f}\n"
-        f"\U0001f3af Take Profit: ${analysis['take_profit']:,.2f}\n\n"
-        f"/analyze {symbol} לניתוח מלא"
+        f"\U0001f6a8 התראה — {symbol} {verdict} [{score}/100]\n"
+        f"{_ALERT_SEP}\n"
+        f"\U0001f4b0 מחיר: ${price:,.2f} ({sign}{change_pct:.1f}% היום)\n"
+        f"\U0001f4ca ציון: {score}/100 | RSI: {rsi:.1f} ✅\n"
+        f"\U0001f4c8 מעל EMA150 ✅ | נפח גבוה {vol_tag}\n"
+        f"{signals_str}\n"
+        f"\U0001f6d1 Stop: ${analysis['stop_loss']:,.2f} | \U0001f3af TP: ${analysis['take_profit']:,.2f}\n"
+        f"⚖️ Risk/Reward: 1:2\n"
+        f"{_ALERT_SEP}\n"
+        f"\U0001f4a1 /analyze {symbol} לניתוח מלא"
     )
 
 
@@ -213,9 +199,10 @@ async def run_morning_scan(bot: Bot, chat_id: str) -> None:
     await send_morning_scan(bot, chat_id, top, lang=lang)
 
 
-# ── Check routines ────────────────────────────────────────────────────────────
+# ── Check routine ─────────────────────────────────────────────────────────────
 
-async def check_price_alerts(bot: Bot, chat_id: str) -> None:
+async def check_alerts(bot: Bot, chat_id: str) -> None:
+    """Single unified alert loop — all 9 swing-trade conditions must pass."""
     wl = get_watchlist()
     all_symbols = [s for symbols in wl.values() for s in symbols]
     if not all_symbols:
@@ -228,95 +215,69 @@ async def check_price_alerts(bot: Bot, chat_id: str) -> None:
             continue
 
         change_pct = price_data["change_pct"]
-        if abs(change_pct) < ALERT_THRESHOLD_PCT:
+
+        # Gate 1: positive price movement ≥ ALERT_MIN_PRICE_CHANGE (BUY only)
+        if change_pct < ALERT_MIN_PRICE_CHANGE:
+            print(f"[ALERT SKIP] {symbol} — price change {change_pct:+.1f}% below threshold {ALERT_MIN_PRICE_CHANGE}%")
             continue
 
-        # 1. In-memory check — instant, catches same-cycle duplicates before
-        #    any expensive work or DB access.
+        # Gate 2: in-memory dedup — instant, no DB, catches same-cycle dupes
         key = _session_key(symbol)
         if key in _alerted_this_session:
             print(f"[DUPLICATE SKIP] {symbol} — already alerted at {_alerted_this_session[key]}, cooldown {ALERT_COOLDOWN_HOURS}h")
             continue
 
-        # 2. DB cooldown check — persists across restarts, avoids re-alerting
-        #    after bot restart within the cooldown window.
+        # Gate 3: DB cooldown — persists across restarts
         if _in_cooldown(symbol):
-            print(f"[ALERT SKIP] {symbol} in cooldown ({ALERT_COOLDOWN_HOURS}h) — skipping expensive compute")
+            print(f"[ALERT SKIP] {symbol} — in cooldown ({ALERT_COOLDOWN_HOURS}h)")
             continue
 
-        # 3. Expensive compute only if both guards passed.
+        # Gate 4: expensive compute — only reached if all cheap gates passed
         df = get_historical(symbol, period="1y")
         if df is None:
             continue
 
         analysis = full_analysis(symbol, df, price_data["price"])
-        score   = analysis["score"]
-        verdict = analysis["verdict"]
-        print(f"[ALERT CHECK] {symbol} price_change={change_pct:+.1f}% score={score} verdict={verdict}")
+        score     = analysis["score"]
+        verdict   = analysis["verdict"]
+        rsi       = analysis["rsi"]
+        above_ema = analysis["above_ema150"]
+        triggered = analysis.get("triggered_signals", [])
+        has_vol   = "volume_spike" in triggered
 
-        # 4. Score + verdict gate — price move alone is not enough.
-        if score < ALERT_MIN_SCORE or verdict not in ALERT_VERDICTS:
-            print(f"[ALERT SKIP] {symbol} score={score} verdict={verdict} — does not meet BUY threshold")
+        # Gate 5: price above EMA150
+        if not above_ema:
+            print(f"[ALERT SKIP] {symbol} — price below EMA150")
             continue
 
-        alert_type = "PRICE_UP" if change_pct >= 0 else "PRICE_DOWN"
-        message    = _fmt_price_alert(symbol, change_pct, price_data["price"], analysis)
+        # Gate 6: RSI in swing-trade zone (not oversold noise, not overbought)
+        if rsi > ALERT_RSI_MAX:
+            print(f"[ALERT SKIP] {symbol} — RSI {rsi:.1f} overbought (max {ALERT_RSI_MAX})")
+            continue
+        if rsi < ALERT_RSI_MIN:
+            print(f"[ALERT SKIP] {symbol} — RSI {rsi:.1f} below minimum ({ALERT_RSI_MIN})")
+            continue
 
-        # 5. Send
+        # Gate 7: volume spike confirms institutional participation
+        if not has_vol:
+            print(f"[ALERT SKIP] {symbol} — no volume spike")
+            continue
+
+        # Gate 8: composite score + verdict
+        if score < ALERT_MIN_SCORE or verdict not in ALERT_VERDICTS:
+            print(f"[ALERT SKIP] {symbol} — score={score} verdict={verdict} below threshold")
+            continue
+
+        # All 9 gates passed → fire
+        print(f"[ALERT FIRE] {symbol} score={score} RSI={rsi:.1f} change={change_pct:+.1f}% volume=spike → SENDING")
+
+        message = _fmt_buy_alert(symbol, change_pct, price_data["price"], analysis)
         await send_alert(bot, chat_id, message, symbol=symbol)
 
-        # 6. Mark in-memory FIRST, then DB — so the next symbol in this same
-        #    loop iteration sees the guard even before the DB commit settles.
+        # Mark in-memory first so next symbol sees the guard before DB settles
         _alerted_this_session[key] = datetime.now().strftime("%H:%M")
-        log_alert(symbol, alert_type, message)
-        print(f"[agent] Price alert sent: {symbol} {change_pct:+.1f}% score={score}")
-
-
-async def check_technical_alerts(bot: Bot, chat_id: str) -> None:
-    wl = get_watchlist()
-    all_symbols = [s for symbols in wl.values() for s in symbols]
-
-    for symbol in all_symbols:
-        df = get_historical(symbol, period="1y")
-        if df is None:
-            continue
-
-        price_data = get_current_price(symbol)
-        if not price_data:
-            continue
-
-        analysis = full_analysis(symbol, df, price_data["price"])
-        score   = analysis["score"]
-        verdict = analysis["verdict"]
-        rsi     = analysis["rsi"]
-        print(f"[ALERT CHECK] {symbol} score={score} verdict={verdict} rsi={rsi} min={ALERT_MIN_SCORE}")
-
-        # 1. Score + verdict gate
-        if score < ALERT_MIN_SCORE or verdict not in ALERT_VERDICTS:
-            continue
-
-        # 2. In-memory check — catches the case where check_price_alerts
-        #    already fired for this symbol earlier in the same run_checks() cycle.
-        key = _session_key(symbol)
-        if key in _alerted_this_session:
-            print(f"[DUPLICATE SKIP] {symbol} — already alerted at {_alerted_this_session[key]}, cooldown {ALERT_COOLDOWN_HOURS}h")
-            continue
-
-        # 3. DB cooldown check
-        if _in_cooldown(symbol):
-            print(f"[ALERT SKIP] {symbol} in cooldown ({ALERT_COOLDOWN_HOURS}h)")
-            continue
-
-        alert_type = "RSI_OVERSOLD" if rsi < 25 else "STRONG_BUY"
-        message    = _fmt_technical_alert(symbol, alert_type, analysis)
-
-        # 4. Send
-        await send_alert(bot, chat_id, message, symbol=symbol)
-
-        # 5. Mark in-memory first, then DB
-        _alerted_this_session[key] = datetime.now().strftime("%H:%M")
-        log_alert(symbol, alert_type, message)
-        print(f"[agent] Technical alert sent: {symbol} — {alert_type} score={score}")
+        log_alert(symbol, "BUY_SIGNAL", message)
+        print(f"[agent] Alert sent: {symbol} score={score} RSI={rsi:.1f}")
 
 
 async def run_checks(bot: Bot, chat_id: str) -> None:
@@ -327,8 +288,7 @@ async def run_checks(bot: Bot, chat_id: str) -> None:
         return
 
     print(f"[agent] {datetime.now().strftime('%H:%M:%S')} — running checks...")
-    await check_price_alerts(bot, chat_id)
-    await check_technical_alerts(bot, chat_id)
+    await check_alerts(bot, chat_id)
     print(f"[agent] {datetime.now().strftime('%H:%M:%S')} — checks complete.")
 
 
