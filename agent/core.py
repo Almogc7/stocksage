@@ -9,8 +9,10 @@ from telegram import Bot
 
 from analyzers.technical import full_analysis
 from config import (
+    ALERT_COOLDOWN_HOURS,
     ALERT_MIN_SCORE,
     ALERT_THRESHOLD_PCT,
+    ALERT_VERDICTS,
     CHECK_INTERVAL_MINUTES,
     INDEX_ALERT_THRESHOLD_PCT,
     MARKET_OPEN_HOUR_IL,
@@ -19,7 +21,7 @@ from config import (
     SCAN_TOP_N,
 )
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
-from db.database import get_language, get_today_alerts, get_watchlist, log_alert
+from db.database import get_language, get_today_alerts, get_watchlist, log_alert, was_alerted_recently
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
 
@@ -38,14 +40,11 @@ async def send_alert(bot: Bot, chat_id: str, message: str, symbol: str = "") -> 
         print(f"[TELEGRAM ERROR]{label} {type(e).__name__}: {e}")
 
 
-# ── Duplicate guard ───────────────────────────────────────────────────────────
+# ── Cooldown guard ────────────────────────────────────────────────────────────
 
-def _already_alerted_today(symbol: str, alert_type: str) -> bool:
-    today_alerts = get_today_alerts()
-    return any(
-        a["symbol"] == symbol.upper() and a["alert_type"] == alert_type
-        for a in today_alerts
-    )
+def _in_cooldown(symbol: str) -> bool:
+    """True if this symbol was alerted within ALERT_COOLDOWN_HOURS — skip it."""
+    return was_alerted_recently(symbol, hours=ALERT_COOLDOWN_HOURS)
 
 
 # ── Alert formatters ──────────────────────────────────────────────────────────
@@ -223,8 +222,9 @@ async def check_price_alerts(bot: Bot, chat_id: str) -> None:
         if abs(change_pct) < ALERT_THRESHOLD_PCT:
             continue
 
-        alert_type = "PRICE_UP" if change_pct >= 0 else "PRICE_DOWN"
-        if _already_alerted_today(symbol, alert_type):
+        # Cooldown: skip if this symbol was alerted in the last N hours
+        if _in_cooldown(symbol):
+            print(f"[ALERT SKIP] {symbol} in cooldown ({ALERT_COOLDOWN_HOURS}h)")
             continue
 
         df = get_historical(symbol, period="1y")
@@ -232,12 +232,20 @@ async def check_price_alerts(bot: Bot, chat_id: str) -> None:
             continue
 
         analysis = full_analysis(symbol, df, price_data["price"])
-        print(f"[ALERT CHECK] {symbol} price_change={change_pct:+.1f}% score={analysis['score']} threshold={ALERT_THRESHOLD_PCT}%")
-        message = _fmt_price_alert(symbol, change_pct, price_data["price"], analysis)
+        score   = analysis["score"]
+        verdict = analysis["verdict"]
+        print(f"[ALERT CHECK] {symbol} price_change={change_pct:+.1f}% score={score} verdict={verdict}")
 
+        # Price move is necessary but NOT sufficient — must also pass score+verdict gate
+        if score < ALERT_MIN_SCORE or verdict not in ALERT_VERDICTS:
+            print(f"[ALERT SKIP] {symbol} score={score} verdict={verdict} — does not meet BUY threshold")
+            continue
+
+        alert_type = "PRICE_UP" if change_pct >= 0 else "PRICE_DOWN"
+        message = _fmt_price_alert(symbol, change_pct, price_data["price"], analysis)
         await send_alert(bot, chat_id, message, symbol=symbol)
         log_alert(symbol, alert_type, message)
-        print(f"[agent] Price alert sent: {symbol} {change_pct:+.1f}%")
+        print(f"[agent] Price alert sent: {symbol} {change_pct:+.1f}% score={score}")
 
 
 async def check_technical_alerts(bot: Bot, chat_id: str) -> None:
@@ -254,23 +262,31 @@ async def check_technical_alerts(bot: Bot, chat_id: str) -> None:
             continue
 
         analysis = full_analysis(symbol, df, price_data["price"])
-        print(f"[ALERT CHECK] {symbol} score={analysis['score']} verdict={analysis['verdict']} rsi={analysis['rsi']} threshold={ALERT_MIN_SCORE}")
+        score   = analysis["score"]
+        verdict = analysis["verdict"]
+        rsi     = analysis["rsi"]
+        print(f"[ALERT CHECK] {symbol} score={score} verdict={verdict} rsi={rsi} min={ALERT_MIN_SCORE}")
 
-        checks = []
-        if analysis["score"] >= ALERT_MIN_SCORE:
-            checks.append("STRONG_BUY")
-        if analysis["rsi"] < 25:
-            checks.append("RSI_OVERSOLD")
-        if analysis["rsi"] > 75:
-            checks.append("RSI_OVERBOUGHT")
+        # Both conditions must pass the score+verdict gate before any alert fires
+        qualifies = score >= ALERT_MIN_SCORE and verdict in ALERT_VERDICTS
 
-        for alert_type in checks:
-            if _already_alerted_today(symbol, alert_type):
-                continue
-            message = _fmt_technical_alert(symbol, alert_type, analysis)
-            await send_alert(bot, chat_id, message, symbol=symbol)
-            log_alert(symbol, alert_type, message)
-            print(f"[agent] Technical alert sent: {symbol} — {alert_type}")
+        if not qualifies:
+            continue
+
+        # Cooldown: one alert per symbol per N hours regardless of alert_type
+        if _in_cooldown(symbol):
+            print(f"[ALERT SKIP] {symbol} in cooldown ({ALERT_COOLDOWN_HOURS}h)")
+            continue
+
+        alert_type = "STRONG_BUY"
+        # Prefer the more specific RSI_OVERSOLD label when RSI is extreme
+        if rsi < 25:
+            alert_type = "RSI_OVERSOLD"
+
+        message = _fmt_technical_alert(symbol, alert_type, analysis)
+        await send_alert(bot, chat_id, message, symbol=symbol)
+        log_alert(symbol, alert_type, message)
+        print(f"[agent] Technical alert sent: {symbol} — {alert_type} score={score}")
 
 
 async def run_checks(bot: Bot, chat_id: str) -> None:

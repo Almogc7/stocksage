@@ -6,11 +6,12 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 from agent.core import run_morning_scan
 from analyzers.technical import full_analysis
-from config import ALERT_THRESHOLD_PCT, CATEGORIES, DEFAULT_LANGUAGE, WATCHLIST
+from config import ALERT_COOLDOWN_HOURS, ALERT_THRESHOLD_PCT, CATEGORIES, DEFAULT_LANGUAGE, WATCHLIST
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
 from db.database import (
     add_to_watchlist,
     get_language,
+    get_muted_symbols,
     get_today_alerts,
     get_trade_summary,
     get_trades,
@@ -597,11 +598,24 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         sign = "+" if vix_data["change_pct"] >= 0 else ""
         vix_line = f"\U0001f321 VIX: {vix_data['price']} ({sign}{vix_data['change_pct']}%)\n"
 
+    alerts_today = get_today_alerts()
+    muted        = get_muted_symbols(ALERT_COOLDOWN_HOURS)
+    muted_str    = ", ".join(muted) if muted else ("None" if lang == "en" else "אין")
+
+    if lang == "en":
+        alert_line = f"\U0001f514 Active alerts today: {len(alerts_today)}\n"
+        muted_line = f"\U0001f4f5 Muted (last {ALERT_COOLDOWN_HOURS}h): {muted_str}"
+    else:
+        alert_line = f"\U0001f514 התראות פעילות היום: {len(alerts_today)}\n"
+        muted_line = f"\U0001f4f5 ממתינות (cooldown {ALERT_COOLDOWN_HOURS}h): {muted_str}"
+
     text = (
         f"{s['status_title']}\n\n"
         f"{status}\n"
         f"{vix_line}"
-        f"\U0001f4cb Watchlist: {total} {s['watchlist_stocks']} {len(wl)} {s['watchlist_cats']}"
+        f"\U0001f4cb Watchlist: {total} {s['watchlist_stocks']} {len(wl)} {s['watchlist_cats']}\n"
+        f"{alert_line}"
+        f"{muted_line}"
     )
     await _send(update, text)
 

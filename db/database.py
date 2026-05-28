@@ -159,6 +159,29 @@ def log_alert(symbol: str, alert_type: str, message: str) -> None:
         )
 
 
+def was_alerted_recently(symbol: str, hours: int = 4) -> bool:
+    """True if this symbol has any alert logged within the last `hours` hours."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM alerts WHERE symbol = ?"
+            " AND triggered_at >= datetime('now', ? || ' hours')"
+            " LIMIT 1",
+            (symbol.upper(), f"-{hours}"),
+        ).fetchone()
+    return row is not None
+
+
+def get_muted_symbols(hours: int = 4) -> list[str]:
+    """Return distinct symbols that have been alerted within the last `hours` hours."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT symbol FROM alerts"
+            " WHERE triggered_at >= datetime('now', ? || ' hours')",
+            (f"-{hours}",),
+        ).fetchall()
+    return [row["symbol"] for row in rows]
+
+
 # ── User preferences ─────────────────────────────────────────────────────────
 
 def get_language(chat_id: str) -> str:

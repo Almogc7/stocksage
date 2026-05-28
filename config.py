@@ -154,6 +154,12 @@ WATCHLIST: dict[str, list[str]] = {
 # ציון מינימלי לשליחת התראה טכנית (BUY או STRONG BUY)
 ALERT_MIN_SCORE: int = 70
 
+# שעות המתנה בין התראות על אותה מניה
+ALERT_COOLDOWN_HOURS: int = 4
+
+# רק verdict אלה יגרמו לשליחת התראה
+ALERT_VERDICTS: list[str] = ["BUY", "STRONG BUY"]
+
 # ─────────────────────────────────────────────
 #  סריקת בוקר
 # ─────────────────────────────────────────────
