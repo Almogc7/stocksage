@@ -241,88 +241,106 @@ def calc_swing_levels(df: pd.DataFrame, lookback: int = 50) -> dict:
 def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
     df = _flatten(df)
 
-    ema = check_ema150(df, current_price)
-    rsi_data = calc_rsi(df)
+    # Compute all indicators up front so every return path has the full key set.
+    ema       = check_ema150(df, current_price)
+    rsi_data  = calc_rsi(df)
     macd_data = calc_macd(df)
-    bb = calc_bollinger(df)
-    atr = calc_atr(df)
-    pivots = calc_pivot_points(df)
-    swings = calc_swing_levels(df)
+    bb        = calc_bollinger(df)
+    atr       = calc_atr(df)
+    pivots    = calc_pivot_points(df)
+    swings    = calc_swing_levels(df)
 
-    score = 0
+    ema200_val = _ema200(df)
+    vwap_val   = _vwap(df)
+
+    rsi        = rsi_data["rsi"]
+    stop_loss  = round(current_price - 1.5 * atr["atr"], 4)
+    take_profit = round(current_price + 3.0 * atr["atr"], 4)
+
+    def _base_result(score: int, verdict: str, triggered: list[str]) -> dict:
+        return {
+            "symbol": symbol.upper(),
+            "current_price": current_price,
+            **ema,
+            **rsi_data,
+            **macd_data,
+            **bb,
+            **atr,
+            **pivots,
+            **swings,
+            "ema200":           round(ema200_val, 4) if ema200_val is not None else None,
+            "vwap":             round(vwap_val, 4)   if vwap_val   is not None else None,
+            "score":            score,
+            "verdict":          verdict,
+            "triggered_signals": triggered,
+            "stop_loss":        stop_loss,
+            "take_profit":      take_profit,
+            "risk_reward":      "1:2",
+            "sell_score":       0,
+            # backward-compat aliases for bot/telegram_bot.py
+            "buy_score":        score,
+            "recommendation":   verdict,
+        }
+
+    # ── Veto gates — hard disqualifiers ──────────────────────────────────────
+    if not ema["above_ema150"]:
+        return _base_result(0, "NEUTRAL", [])
+    if rsi < 35:
+        return _base_result(0, "NEUTRAL", [])
+    if rsi > 75:
+        return _base_result(0, "NEUTRAL", [])
+
+    # ── Scoring ───────────────────────────────────────────────────────────────
+    score: int = 0
     triggered: list[str] = []
 
-    # +15  price above EMA150
-    if ema["above_ema150"]:
-        score += 15
-        triggered.append("price_above_ema150")
+    # +20  price above EMA150 (always true here — kept for score transparency)
+    score += 20
+    triggered.append("price_above_ema150")
 
-    # +10  EMA150 > EMA200 (confirmed uptrend)
-    ema200_val = _ema200(df)
+    # +15  EMA150 > EMA200 (long-term uptrend confirmed)
     if ema200_val is not None and ema["ema150"] > ema200_val:
-        score += 10
+        score += 15
         triggered.append("ema150_above_ema200")
 
-    # +20  MACD bullish crossover in last 3 candles
+    # +20  MACD bullish crossover within the last 3 candles
     if _macd_bullish_last3(df):
         score += 20
         triggered.append("macd_bullish_crossover")
 
-    # +15  RSI in healthy zone 40–65
-    if 40 <= rsi_data["rsi"] <= 65:
+    # +15  RSI in ideal swing zone (45–65); +5 if acceptable fringe (35–45 or 65–75)
+    if 45 <= rsi <= 65:
         score += 15
         triggered.append("rsi_healthy_range")
+    elif rsi < 45 or rsi > 65:   # fringe zone — veto already blocked < 35 and > 75
+        score += 5
+        triggered.append("rsi_healthy_range")
 
-    # +15  volume spike > 1.5× 20-day average
+    # +15  Volume spike — current volume > 1.5× 20-day average
     if _volume_spike(df):
         score += 15
         triggered.append("volume_spike")
 
-    # +15  Stochastic RSI %K crosses above %D from below 30
+    # +10  Stochastic RSI %K crossed above %D from below 0.3
     if _stoch_rsi_bullish(df):
-        score += 15
+        score += 10
         triggered.append("stoch_rsi_bullish_cross")
 
-    # +10  price above rolling VWAP
-    vwap_val = _vwap(df)
+    # +5   Price above rolling VWAP
     if vwap_val is not None and current_price > vwap_val:
-        score += 10
+        score += 5
         triggered.append("above_vwap")
 
     score = max(0, min(100, score))
 
-    if score >= 86:
+    # ── Verdict ───────────────────────────────────────────────────────────────
+    if score >= 75:
         verdict = "STRONG BUY"
-    elif score >= 71:
+    elif score >= 55:
         verdict = "BUY"
-    elif score >= 51:
-        verdict = "WEAK BUY"
-    elif score >= 31:
+    elif score >= 35:
         verdict = "WATCH"
     else:
-        verdict = "AVOID"
+        verdict = "NEUTRAL"
 
-    stop_loss = round(current_price - 1.5 * atr["atr"], 4)
-    take_profit = round(current_price + 3.0 * atr["atr"], 4)
-
-    return {
-        "symbol": symbol.upper(),
-        "current_price": current_price,
-        **ema,
-        **rsi_data,
-        **macd_data,
-        **bb,
-        **atr,
-        **pivots,
-        **swings,
-        "ema200": round(ema200_val, 4) if ema200_val is not None else None,
-        "vwap": round(vwap_val, 4) if vwap_val is not None else None,
-        "score": score,
-        "verdict": verdict,
-        "triggered_signals": triggered,
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        # backward-compat aliases for bot/telegram_bot.py
-        "buy_score": score,
-        "recommendation": verdict,
-    }
+    return _base_result(score, verdict, triggered)
