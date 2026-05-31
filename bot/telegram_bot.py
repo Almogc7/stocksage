@@ -30,172 +30,208 @@ from db.database import (
 
 STRINGS: dict[str, dict[str, str]] = {
     "he": {
+        # start
+        "start_welcome":         "\U0001f4ca ברוך הבא ל-StockSage!\n\nהקלד /help לרשימת כל הפקודות.\nהקלד /language en לאנגלית.",
         # scan
-        "scan_title":           "\U0001f305 סריקת בוקר — StockSage",
-        "scan_running":         "\U0001f305 מריץ סריקת מניות — זה יכול לקחת כמה דקות...",
-        "market_open":          "שוק פתוח",
-        "stop":                 "Stop",
-        "take_profit":          "TP",
-        "full_analysis":        "לניתוח מלא",
-        "no_results":           "לא נמצאו מניות עם ציון מעל 50",
+        "scan_title":            "\U0001f305 סריקת בוקר — StockSage",
+        "scan_running":          "\U0001f305 מריץ סריקת מניות — זה יכול לקחת כמה דקות...",
+        "market_open":           "שוק פתוח",
+        "stop":                  "Stop",
+        "take_profit":           "TP",
+        "full_analysis":         "לניתוח מלא",
+        "no_results":            "לא נמצאו מניות עם ציון מעל 50",
         # watchlist
-        "watchlist_title":      "\U0001f4cb Watchlist",
-        "watchlist_empty":      "\U0001f4cb ה-Watchlist ריק.",
-        "fetching_prices":      "⏳ מושך מחירים...",
-        "added":                "נוסף לקטגוריה",
-        "removed":              "הוסר מה-Watchlist",
+        "watchlist_title":       "\U0001f4cb Watchlist",
+        "watchlist_empty":       "\U0001f4cb ה-Watchlist ריק.",
+        "fetching_prices":       "⏳ מושך מחירים...",
+        "added":                 "נוסף לקטגוריה",
+        "removed":               "הוסר מה-Watchlist",
         # analysis
-        "not_found":            "לא נמצאו נתונים עבור",
-        "fetching_data":        "⏳ מושך נתונים עבור",
-        "analysis_title":       "ניתוח",
-        "buy_score":            "ציון",
-        "recommendation":       "המלצה",
-        "signals":              "איתותים",
-        "ema_above":            "✅ פתוח",
-        "ema_below":            "❌ סגור",
-        "rsi_oversold":         "מכירת יתר",
-        "rsi_overbought":       "קנייה יתר",
-        "rsi_neutral":          "ניטרלי",
-        "macd_bullish":         "חצייה שורית \U0001f4c8",
-        "macd_bearish":         "חצייה דובית \U0001f4c9",
-        "macd_none":            "אין crossover",
-        "bb_above_upper":       "מעל הבנד העליון",
-        "bb_near_upper":        "קרוב לבנד העליון",
-        "bb_middle":            "אמצע הבנד",
-        "bb_near_lower":        "קרוב לבנד התחתון",
-        "bb_below_lower":       "מתחת לבנד התחתון",
+        "not_found":             "לא נמצאו נתונים עבור",
+        "fetching_data":         "⏳ מושך נתונים עבור",
+        "analysis_title":        "ניתוח",
+        "buy_score":             "ציון",
+        "recommendation":        "המלצה",
+        "signals":               "איתותים",
+        "ema_above":             "✅ פתוח",
+        "ema_below":             "❌ סגור",
+        "rsi_oversold":          "מכירת יתר",
+        "rsi_overbought":        "קנייה יתר",
+        "rsi_neutral":           "ניטרלי",
+        "macd_bullish":          "חצייה שורית \U0001f4c8",
+        "macd_bearish":          "חצייה דובית \U0001f4c9",
+        "macd_none":             "אין crossover",
+        "bb_above_upper":        "מעל הבנד העליון",
+        "bb_near_upper":         "קרוב לבנד העליון",
+        "bb_middle":             "אמצע הבנד",
+        "bb_near_lower":         "קרוב לבנד התחתון",
+        "bb_below_lower":        "מתחת לבנד התחתון",
+        # usage / errors
+        "analyze_usage":         "שימוש: /analyze <SYMBOL>\nדוגמה: /analyze NVDA",
+        "add_usage":             "שימוש: /add <SYMBOL> <CATEGORY>\nדוגמה: /add NVDA Tech",
+        "remove_usage":          "שימוש: /remove <SYMBOL>\nדוגמה: /remove NVDA",
+        "trade_usage":           "שימוש: /trade <BUY|SELL> <SYMBOL> <כמות> <מחיר> [הערה]\nדוגמה: /trade BUY NVDA 10 225.32",
+        "summary_usage":         "שימוש: /summary <SYMBOL>\nדוגמה: /summary NVDA",
+        "unknown_category":      "קטגוריה לא קיימת",
+        "available_categories":  "קטגוריות זמינות",
+        "invalid_number":        "כמות ומחיר חייבים להיות מספרים",
         # trades
-        "trade_recorded":       "עסקה נרשמה",
-        "action_label":         "פעולה",
-        "symbol_label":         "מניה",
-        "qty_label":            "כמות",
-        "total_label":          'סה״כ',
-        "action_buy":           "קנייה",
-        "action_sell":          "מכירה",
-        "recommended_stop":     "Stop Loss מומלץ",
-        "recommended_tp":       "Take Profit מומלץ",
-        "no_trades":            "אין עסקאות",
-        "all_trades":           "כל העסקאות",
-        "trades_label":         "עסקאות",
-        "last_10":              "אחרונות 10",
-        "avg_buy_price":        "מחיר קנייה ממוצע",
-        "current_qty":          "כמות נוכחית",
-        "realized_pnl":         "רווח/הפסד ממומש",
-        "no_trades_for":        "אין עסקאות עבור",
-        "summary_title":        "סיכום עסקאות",
+        "trade_recorded":        "עסקה נרשמה",
+        "action_label":          "פעולה",
+        "symbol_label":          "מניה",
+        "qty_label":             "כמות",
+        "total_label":           'סה״כ',
+        "action_buy":            "קנייה",
+        "action_sell":           "מכירה",
+        "recommended_stop":      "Stop Loss מומלץ",
+        "recommended_tp":        "Take Profit מומלץ",
+        "no_trades":             "אין עסקאות",
+        "all_trades":            "כל העסקאות",
+        "trades_label":          "עסקאות",
+        "last_10":               "אחרונות 10",
+        "avg_buy_price":         "מחיר קנייה ממוצע",
+        "current_qty":           "כמות נוכחית",
+        "realized_pnl":          "רווח/הפסד ממומש",
+        "no_trades_for":         "אין עסקאות עבור",
+        "summary_title":         "סיכום עסקאות",
         # alerts
-        "no_alerts":            "\U0001f514 אין התראות להיום.",
-        "alerts_title":         "\U0001f514 התראות היום",
-        # status / test
-        "market_status_open":   "\U0001f7e2 השוק פתוח",
-        "market_status_closed": "\U0001f534 השוק סגור",
-        "status_title":         "\U0001f4f1 סטטוס StockSage",
-        "watchlist_stocks":     "מניות ב",
-        "watchlist_cats":       "קטגוריות",
-        "test_msg":             "StockSage פועל תקין",
+        "no_alerts":             "\U0001f514 אין התראות להיום.",
+        "alerts_title":          "\U0001f514 התראות היום",
+        # status
+        "market_open_hours":     "\U0001f7e2 השוק פתוח — נסגר ב-23:00",
+        "market_closed_weekend": "\U0001f534 השוק סגור — סוף שבוע",
+        "market_closed_hours":   "\U0001f534 השוק סגור — נפתח ב-16:30",
+        "alerts_active_today":   "התראות פעילות היום",
+        "muted_label":           "ממתינות (cooldown {hours}h)",
+        "none_label":            "אין",
+        "market_status_open":    "\U0001f7e2 השוק פתוח",
+        "market_status_closed":  "\U0001f534 השוק סגור",
+        "status_title":          "\U0001f4f1 סטטוס StockSage",
+        "watchlist_stocks":      "מניות ב",
+        "watchlist_cats":        "קטגוריות",
+        # test
+        "test_msg":              "StockSage פועל תקין",
         # help
-        "help_title":           "\U0001f916 StockSage — פקודות זמינות",
-        "help_analysis_sec":    "\U0001f4ca ניתוח",
-        "help_watchlist_sec":   "\U0001f4cb Watchlist",
-        "help_trades_sec":      "\U0001f4bc עסקאות",
-        "help_tools_sec":       "⚙️ כלים",
-        "help_analyze":         "ניתוח טכני מלא",
-        "help_scan":            "סריקת מניות חמות עכשיו",
-        "help_watchlist_cmd":   "הצג את כל המניות",
-        "help_add":             "הוסף מניה",
-        "help_remove":          "הסר מניה",
-        "help_trade":           "תעד עסקה",
-        "help_trades_cmd":      "היסטוריית עסקאות",
-        "help_summary":         "סיכום פוזיציה",
-        "help_alerts":          "התראות היום",
-        "help_status":          "סטטוס שוק",
-        "help_test":            "בדיקת חיבור Bot",
-        "help_help":            "הצג תפריט זה",
-        "help_language":        "שנה שפה",
+        "help_title":            "\U0001f916 StockSage — פקודות זמינות",
+        "help_analysis_sec":     "\U0001f4ca ניתוח",
+        "help_watchlist_sec":    "\U0001f4cb Watchlist",
+        "help_trades_sec":       "\U0001f4bc עסקאות",
+        "help_tools_sec":        "⚙️ כלים",
+        "help_analyze":          "ניתוח טכני מלא",
+        "help_scan":             "סריקת מניות חמות עכשיו",
+        "help_watchlist_cmd":    "הצג את כל המניות",
+        "help_add":              "הוסף מניה",
+        "help_remove":           "הסר מניה",
+        "help_trade":            "תעד עסקה",
+        "help_trades_cmd":       "היסטוריית עסקאות",
+        "help_summary":          "סיכום פוזיציה",
+        "help_alerts":           "התראות היום",
+        "help_status":           "סטטוס שוק",
+        "help_test":             "בדיקת חיבור Bot",
+        "help_help":             "הצג תפריט זה",
+        "help_language":         "שנה שפה",
     },
     "en": {
+        # start
+        "start_welcome":         "\U0001f4ca Welcome to StockSage!\n\nType /help to see all available commands.\nType /language he to switch to Hebrew.",
         # scan
-        "scan_title":           "\U0001f305 Morning Scan — StockSage",
-        "scan_running":         "\U0001f305 Running stock scan — this may take a few minutes...",
-        "market_open":          "Market Open",
-        "stop":                 "Stop",
-        "take_profit":          "Target",
-        "full_analysis":        "Full analysis",
-        "no_results":           "No stocks found with score above 50",
+        "scan_title":            "\U0001f305 Morning Scan — StockSage",
+        "scan_running":          "\U0001f305 Running stock scan — this may take a few minutes...",
+        "market_open":           "Market Open",
+        "stop":                  "Stop",
+        "take_profit":           "Target",
+        "full_analysis":         "Full analysis",
+        "no_results":            "No stocks found with score above 50",
         # watchlist
-        "watchlist_title":      "\U0001f4cb Watchlist",
-        "watchlist_empty":      "\U0001f4cb Watchlist is empty.",
-        "fetching_prices":      "⏳ Fetching prices...",
-        "added":                "Added to category",
-        "removed":              "Removed from Watchlist",
+        "watchlist_title":       "\U0001f4cb Watchlist",
+        "watchlist_empty":       "\U0001f4cb Watchlist is empty.",
+        "fetching_prices":       "⏳ Fetching prices...",
+        "added":                 "Added to category",
+        "removed":               "Removed from Watchlist",
         # analysis
-        "not_found":            "No data found for",
-        "fetching_data":        "⏳ Fetching data for",
-        "analysis_title":       "Analysis",
-        "buy_score":            "Score",
-        "recommendation":       "Recommendation",
-        "signals":              "Signals",
-        "ema_above":            "✅ Above",
-        "ema_below":            "❌ Below",
-        "rsi_oversold":         "Oversold",
-        "rsi_overbought":       "Overbought",
-        "rsi_neutral":          "Neutral",
-        "macd_bullish":         "Bullish crossover \U0001f4c8",
-        "macd_bearish":         "Bearish crossover \U0001f4c9",
-        "macd_none":            "No crossover",
-        "bb_above_upper":       "Above upper band",
-        "bb_near_upper":        "Near upper band",
-        "bb_middle":            "Middle band",
-        "bb_near_lower":        "Near lower band",
-        "bb_below_lower":       "Below lower band",
+        "not_found":             "No data found for",
+        "fetching_data":         "⏳ Fetching data for",
+        "analysis_title":        "Analysis",
+        "buy_score":             "Score",
+        "recommendation":        "Recommendation",
+        "signals":               "Signals",
+        "ema_above":             "✅ Above",
+        "ema_below":             "❌ Below",
+        "rsi_oversold":          "Oversold",
+        "rsi_overbought":        "Overbought",
+        "rsi_neutral":           "Neutral",
+        "macd_bullish":          "Bullish crossover \U0001f4c8",
+        "macd_bearish":          "Bearish crossover \U0001f4c9",
+        "macd_none":             "No crossover",
+        "bb_above_upper":        "Above upper band",
+        "bb_near_upper":         "Near upper band",
+        "bb_middle":             "Middle band",
+        "bb_near_lower":         "Near lower band",
+        "bb_below_lower":        "Below lower band",
+        # usage / errors
+        "analyze_usage":         "Usage: /analyze <SYMBOL>\nExample: /analyze NVDA",
+        "add_usage":             "Usage: /add <SYMBOL> <CATEGORY>\nExample: /add NVDA Tech",
+        "remove_usage":          "Usage: /remove <SYMBOL>\nExample: /remove NVDA",
+        "trade_usage":           "Usage: /trade <BUY|SELL> <SYMBOL> <QTY> <PRICE> [NOTE]\nExample: /trade BUY NVDA 10 225.32",
+        "summary_usage":         "Usage: /summary <SYMBOL>\nExample: /summary NVDA",
+        "unknown_category":      "Unknown category",
+        "available_categories":  "Available categories",
+        "invalid_number":        "Quantity and price must be numbers",
         # trades
-        "trade_recorded":       "Trade recorded",
-        "action_label":         "Action",
-        "symbol_label":         "Symbol",
-        "qty_label":            "Qty",
-        "total_label":          "Total",
-        "action_buy":           "Buy",
-        "action_sell":          "Sell",
-        "recommended_stop":     "Recommended Stop Loss",
-        "recommended_tp":       "Recommended Take Profit",
-        "no_trades":            "No trades",
-        "all_trades":           "All trades",
-        "trades_label":         "Trades for",
-        "last_10":              "last 10",
-        "avg_buy_price":        "Average buy price",
-        "current_qty":          "Current quantity",
-        "realized_pnl":         "Realized P&L",
-        "no_trades_for":        "No trades for",
-        "summary_title":        "Trade Summary",
+        "trade_recorded":        "Trade recorded",
+        "action_label":          "Action",
+        "symbol_label":          "Symbol",
+        "qty_label":             "Qty",
+        "total_label":           "Total",
+        "action_buy":            "Buy",
+        "action_sell":           "Sell",
+        "recommended_stop":      "Recommended Stop Loss",
+        "recommended_tp":        "Recommended Take Profit",
+        "no_trades":             "No trades",
+        "all_trades":            "All trades",
+        "trades_label":          "Trades for",
+        "last_10":               "last 10",
+        "avg_buy_price":         "Average buy price",
+        "current_qty":           "Current quantity",
+        "realized_pnl":          "Realized P&L",
+        "no_trades_for":         "No trades for",
+        "summary_title":         "Trade Summary",
         # alerts
-        "no_alerts":            "\U0001f514 No alerts today.",
-        "alerts_title":         "\U0001f514 Today's Alerts",
-        # status / test
-        "market_status_open":   "\U0001f7e2 Market is open",
-        "market_status_closed": "\U0001f534 Market is closed",
-        "status_title":         "\U0001f4f1 StockSage Status",
-        "watchlist_stocks":     "stocks in",
-        "watchlist_cats":       "categories",
-        "test_msg":             "StockSage is running",
+        "no_alerts":             "\U0001f514 No alerts today.",
+        "alerts_title":          "\U0001f514 Today's Alerts",
+        # status
+        "market_open_hours":     "\U0001f7e2 Market open — closes at 16:00 EST",
+        "market_closed_weekend": "\U0001f534 Market closed — weekend",
+        "market_closed_hours":   "\U0001f534 Market closed — opens at 09:30 EST",
+        "alerts_active_today":   "Active alerts today",
+        "muted_label":           "Muted (last {hours}h)",
+        "none_label":            "None",
+        "market_status_open":    "\U0001f7e2 Market is open",
+        "market_status_closed":  "\U0001f534 Market is closed",
+        "status_title":          "\U0001f4f1 StockSage Status",
+        "watchlist_stocks":      "stocks in",
+        "watchlist_cats":        "categories",
+        # test
+        "test_msg":              "StockSage is running",
         # help
-        "help_title":           "\U0001f916 StockSage — Available Commands",
-        "help_analysis_sec":    "\U0001f4ca Analysis",
-        "help_watchlist_sec":   "\U0001f4cb Watchlist",
-        "help_trades_sec":      "\U0001f4bc Trades",
-        "help_tools_sec":       "⚙️ Tools",
-        "help_analyze":         "Full technical analysis",
-        "help_scan":            "Hot stocks scan now",
-        "help_watchlist_cmd":   "Show all stocks",
-        "help_add":             "Add a stock",
-        "help_remove":          "Remove a stock",
-        "help_trade":           "Record a trade",
-        "help_trades_cmd":      "Trade history",
-        "help_summary":         "Position summary",
-        "help_alerts":          "Today's alerts",
-        "help_status":          "Market status",
-        "help_test":            "Connection test",
-        "help_help":            "Show this menu",
-        "help_language":        "Change language",
+        "help_title":            "\U0001f916 StockSage — Available Commands",
+        "help_analysis_sec":     "\U0001f4ca Analysis",
+        "help_watchlist_sec":    "\U0001f4cb Watchlist",
+        "help_trades_sec":       "\U0001f4bc Trades",
+        "help_tools_sec":        "⚙️ Tools",
+        "help_analyze":          "Full technical analysis",
+        "help_scan":             "Hot stocks scan now",
+        "help_watchlist_cmd":    "Show all stocks",
+        "help_add":              "Add a stock",
+        "help_remove":           "Remove a stock",
+        "help_trade":            "Record a trade",
+        "help_trades_cmd":       "Trade history",
+        "help_summary":          "Position summary",
+        "help_alerts":           "Today's alerts",
+        "help_status":           "Market status",
+        "help_test":             "Connection test",
+        "help_help":             "Show this menu",
+        "help_language":         "Change language",
     },
 }
 
@@ -267,33 +303,35 @@ async def _send(update: Update, text: str) -> None:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lang = get_language(str(update.effective_chat.id))
-    if lang == "en":
-        text = (
-            "\U0001f4ca Welcome to StockSage!\n\n"
-            "Type /help to see all available commands.\n"
-            "Type /language he to switch to Hebrew."
-        )
-    else:
-        text = (
-            "\U0001f4ca ברוך הבא ל-StockSage!\n\n"
-            "הקלד /help לרשימת כל הפקודות.\n"
-            "הקלד /language en לאנגלית."
-        )
-    await _send(update, text)
+    await _send(update, STRINGS[lang]["start_welcome"])
 
 
 async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args or context.args[0].lower() not in ("he", "en"):
-        await _send(update, "שימוש: /language he | /language en\nUsage: /language he | /language en")
+    chat_id = str(update.effective_chat.id)
+    args = context.args
+
+    if not args or args[0].lower() not in ("he", "en"):
+        lang = get_language(chat_id)
+        current = "עברית \U0001f1ee\U0001f1f1" if lang == "he" else "English \U0001f1ec\U0001f1e7"
+        await _send(update,
+            f"\U0001f310 שפה נוכחית: {current}\n\n"
+            f"לשינוי שפה:\n"
+            f"/language he — עברית\n"
+            f"/language en — English"
+        )
         return
 
-    lang = context.args[0].lower()
-    set_language(str(update.effective_chat.id), lang)
+    new_lang = args[0].lower()
+    set_language(chat_id, new_lang)
 
-    if lang == "he":
-        await _send(update, "✅ השפה שונתה לעברית | Language changed to Hebrew")
+    if new_lang == "he":
+        await _send(update,
+            "✅ השפה שונתה לעברית \U0001f1ee\U0001f1f1\n"
+            "Language changed to Hebrew")
     else:
-        await _send(update, "✅ Language changed to English | השפה שונתה לאנגלית")
+        await _send(update,
+            "✅ Language changed to English \U0001f1ec\U0001f1e7\n"
+            "השפה שונתה לאנגלית")
 
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -301,12 +339,7 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     s = STRINGS[lang]
 
     if not context.args:
-        msg = (
-            "Usage: /analyze <SYMBOL>\nExample: /analyze NVDA"
-            if lang == "en" else
-            "שימוש: /analyze <SYMBOL>\nדוגמה: /analyze NVDA"
-        )
-        await _send(update, msg)
+        await _send(update, s["analyze_usage"])
         return
 
     symbol = context.args[0].upper()
@@ -331,12 +364,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     s = STRINGS[lang]
 
     if len(context.args) < 2:
-        msg = (
-            "Usage: /add <SYMBOL> <CATEGORY>\nExample: /add NVDA Tech"
-            if lang == "en" else
-            "שימוש: /add <SYMBOL> <CATEGORY>\nדוגמה: /add NVDA Tech"
-        )
-        await _send(update, msg)
+        await _send(update, s["add_usage"])
         return
 
     symbol = context.args[0].upper()
@@ -344,12 +372,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if category not in CATEGORIES:
         cats = "\n".join(f"  • {c}" for c in CATEGORIES)
-        msg = (
-            f"❌ Unknown category: {category}\n\nAvailable:\n{cats}"
-            if lang == "en" else
-            f"❌ קטגוריה לא קיימת: {category}\n\nקטגוריות זמינות:\n{cats}"
-        )
-        await _send(update, msg)
+        await _send(update, f"❌ {s['unknown_category']}: {category}\n\n{s['available_categories']}:\n{cats}")
         return
 
     add_to_watchlist(symbol, category)
@@ -361,12 +384,7 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     s = STRINGS[lang]
 
     if not context.args:
-        msg = (
-            "Usage: /remove <SYMBOL>\nExample: /remove NVDA"
-            if lang == "en" else
-            "שימוש: /remove <SYMBOL>\nדוגמה: /remove NVDA"
-        )
-        await _send(update, msg)
+        await _send(update, s["remove_usage"])
         return
 
     symbol = context.args[0].upper()
@@ -406,19 +424,13 @@ async def cmd_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 
-    usage = (
-        "Usage: /trade <BUY|SELL> <SYMBOL> <QTY> <PRICE> [NOTE]\nExample: /trade BUY NVDA 10 225.32"
-        if lang == "en" else
-        "שימוש: /trade <BUY|SELL> <SYMBOL> <QUANTITY> <PRICE> [NOTE]\nדוגמה: /trade BUY NVDA 10 225.32"
-    )
-
     if len(context.args) < 4:
-        await _send(update, usage)
+        await _send(update, s["trade_usage"])
         return
 
     action = context.args[0].upper()
     if action not in ("BUY", "SELL"):
-        await _send(update, f"❌ {action}\n{usage}")
+        await _send(update, f"❌ {action}\n{s['trade_usage']}")
         return
 
     symbol = context.args[1].upper()
@@ -426,12 +438,7 @@ async def cmd_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         quantity = float(context.args[2])
         price    = float(context.args[3])
     except ValueError:
-        msg = (
-            f"❌ Quantity and price must be numbers\n{usage}"
-            if lang == "en" else
-            f"❌ כמות ומחיר חייבים להיות מספרים\n{usage}"
-        )
-        await _send(update, msg)
+        await _send(update, f"❌ {s['invalid_number']}\n{s['trade_usage']}")
         return
 
     note = " ".join(context.args[4:]) if len(context.args) > 4 else ""
@@ -493,12 +500,7 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     s = STRINGS[lang]
 
     if not context.args:
-        msg = (
-            "Usage: /summary <SYMBOL>\nExample: /summary NVDA"
-            if lang == "en" else
-            "שימוש: /summary <SYMBOL>\nדוגמה: /summary NVDA"
-        )
-        await _send(update, msg)
+        await _send(update, s["summary_usage"])
         return
 
     symbol = context.args[0].upper()
@@ -595,11 +597,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     open_      = is_market_open()
 
     if open_:
-        status = "🟢 השוק פתוח — נסגר ב-23:00"         if lang == "he" else "🟢 Market open — closes at 16:00 EST"
+        status = s["market_open_hours"]
     elif is_weekend:
-        status = "🔴 השוק סגור — סוף שבוע"              if lang == "he" else "🔴 Market closed — weekend"
+        status = s["market_closed_weekend"]
     else:
-        status = "🔴 השוק סגור — נפתח ב-16:30"          if lang == "he" else "🔴 Market closed — opens at 09:30 EST"
+        status = s["market_closed_hours"]
 
     wl      = get_watchlist()
     total   = sum(len(v) for v in wl.values())
@@ -612,14 +614,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     alerts_today = get_today_alerts()
     muted        = get_muted_symbols(ALERT_COOLDOWN_HOURS)
-    muted_str    = ", ".join(muted) if muted else ("None" if lang == "en" else "אין")
-
-    if lang == "en":
-        alert_line = f"\U0001f514 Active alerts today: {len(alerts_today)}\n"
-        muted_line = f"\U0001f4f5 Muted (last {ALERT_COOLDOWN_HOURS}h): {muted_str}"
-    else:
-        alert_line = f"\U0001f514 התראות פעילות היום: {len(alerts_today)}\n"
-        muted_line = f"\U0001f4f5 ממתינות (cooldown {ALERT_COOLDOWN_HOURS}h): {muted_str}"
+    muted_str    = ", ".join(muted) if muted else s["none_label"]
+    alert_line   = f"\U0001f514 {s['alerts_active_today']}: {len(alerts_today)}\n"
+    muted_line   = f"\U0001f4f5 {s['muted_label'].format(hours=ALERT_COOLDOWN_HOURS)}: {muted_str}"
 
     text = (
         f"{s['status_title']}\n\n"
