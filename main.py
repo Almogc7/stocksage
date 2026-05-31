@@ -12,7 +12,7 @@ if not TOKEN:
 if not CHAT_ID:
     raise ValueError("TELEGRAM_CHAT_ID missing from .env")
 
-print(f"[DEBUG] TOKEN={TOKEN[:10]}... CHAT_ID={CHAT_ID}")
+print(f"[agent] StockSage starting — watchlist will be loaded from DB")
 
 from db.database import init_db, populate_from_config
 from config import WATCHLIST

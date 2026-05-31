@@ -154,8 +154,8 @@ def get_trade_summary(symbol: str) -> dict:
 def log_alert(symbol: str, alert_type: str, message: str) -> None:
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO alerts (symbol, alert_type, message) VALUES (?, ?, ?)",
-            (symbol.upper(), alert_type, message),
+            "INSERT INTO alerts (symbol, alert_type, message, triggered_at) VALUES (?, ?, ?, ?)",
+            (symbol.upper(), alert_type, message, datetime.utcnow().isoformat(timespec="seconds")),
         )
 
 
@@ -164,7 +164,7 @@ def was_alerted_recently(symbol: str, hours: int = 4) -> bool:
     with _connect() as conn:
         row = conn.execute(
             "SELECT 1 FROM alerts WHERE symbol = ?"
-            " AND triggered_at >= datetime('now', ? || ' hours')"
+            " AND triggered_at >= datetime('now', 'utc', ? || ' hours')"
             " LIMIT 1",
             (symbol.upper(), f"-{hours}"),
         ).fetchone()

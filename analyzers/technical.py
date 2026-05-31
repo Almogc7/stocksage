@@ -322,4 +322,7 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
         "triggered_signals": triggered,
         "stop_loss": stop_loss,
         "take_profit": take_profit,
+        # backward-compat aliases for bot/telegram_bot.py
+        "buy_score": score,
+        "recommendation": verdict,
     }
