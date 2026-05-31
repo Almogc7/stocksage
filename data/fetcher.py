@@ -1,4 +1,4 @@
-from datetime import time
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -133,10 +133,9 @@ def get_52week_high_low(symbol: str) -> dict | None:
 
 
 def is_market_open() -> bool:
-    from datetime import datetime
-    now = datetime.now(ET)
-    if now.weekday() >= 5:
+    now_est = datetime.now(ZoneInfo("America/New_York"))
+    if now_est.weekday() >= 5:  # Saturday or Sunday
         return False
-    market_open = time(9, 30)
-    market_close = time(16, 0)
-    return market_open <= now.time() < market_close
+    market_open  = now_est.replace(hour=9,  minute=30, second=0, microsecond=0)
+    market_close = now_est.replace(hour=16, minute=0,  second=0, microsecond=0)
+    return market_open <= now_est <= market_close

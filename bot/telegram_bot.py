@@ -1,4 +1,7 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 from telegram import BotCommand, Update
 from telegram.constants import ParseMode
@@ -587,8 +590,17 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 
-    open_   = is_market_open()
-    status  = s["market_status_open"] if open_ else s["market_status_closed"]
+    now_est    = datetime.now(_ET)
+    is_weekend = now_est.weekday() >= 5
+    open_      = is_market_open()
+
+    if open_:
+        status = "🟢 השוק פתוח — נסגר ב-23:00"         if lang == "he" else "🟢 Market open — closes at 16:00 EST"
+    elif is_weekend:
+        status = "🔴 השוק סגור — סוף שבוע"              if lang == "he" else "🔴 Market closed — weekend"
+    else:
+        status = "🔴 השוק סגור — נפתח ב-16:30"          if lang == "he" else "🔴 Market closed — opens at 09:30 EST"
+
     wl      = get_watchlist()
     total   = sum(len(v) for v in wl.values())
 
