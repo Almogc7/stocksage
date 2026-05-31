@@ -1,4 +1,5 @@
 import asyncio
+import io
 import threading
 import time
 from datetime import datetime
@@ -7,6 +8,7 @@ from zoneinfo import ZoneInfo
 import schedule
 from telegram import Bot
 
+from analyzers.chart_generator import generate_chart_image
 from analyzers.technical import full_analysis
 from config import (
     ALERT_COOLDOWN_HOURS,
@@ -49,6 +51,23 @@ async def send_alert(bot: Bot, chat_id: str, message: str, symbol: str = "") -> 
         print(f"[TELEGRAM OK]{label} Message delivered successfully")
     except Exception as e:
         print(f"[TELEGRAM ERROR]{label} {type(e).__name__}: {e}")
+
+
+async def send_alert_with_chart(
+    bot: Bot, chat_id: str, caption: str, image_bytes: bytes, symbol: str = ""
+) -> None:
+    label = f" [{symbol}]" if symbol else ""
+    print(f"[ALERT FIRE]{label} Attempting Telegram send_photo to chat_id={chat_id}")
+    try:
+        await bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_bytes), caption=caption)
+        print(f"[TELEGRAM OK]{label} Photo delivered successfully")
+    except Exception as e:
+        print(f"[TELEGRAM ERROR]{label} send_photo failed: {type(e).__name__}: {e} — falling back to text")
+        try:
+            await bot.send_message(chat_id=chat_id, text=caption)
+            print(f"[TELEGRAM OK]{label} Fallback text delivered")
+        except Exception as e2:
+            print(f"[TELEGRAM ERROR]{label} Fallback also failed: {type(e2).__name__}: {e2}")
 
 
 # ── Cooldown guard ────────────────────────────────────────────────────────────
@@ -283,7 +302,15 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
         print(f"[ALERT FIRE] {symbol} score={score} RSI={rsi:.1f} change={change_pct:+.1f}% volume=spike → SENDING")
 
         message = _fmt_buy_alert(symbol, change_pct, price_data["price"], analysis)
-        await send_alert(bot, chat_id, message, symbol=symbol)
+
+        # Attempt chart — df is already in memory from Gate 4, no extra fetch
+        chart_bytes = generate_chart_image(symbol, df, analysis)
+        if chart_bytes:
+            caption = message if len(message) <= 1024 else message[:1021] + "..."
+            await send_alert_with_chart(bot, chat_id, caption, chart_bytes, symbol=symbol)
+        else:
+            print(f"[CHART FAIL] {symbol} — sending text alert only")
+            await send_alert(bot, chat_id, message, symbol=symbol)
 
         # Mark in-memory first so next symbol sees the guard before DB settles
         _alerted_this_session[key] = datetime.now().strftime("%H:%M")
