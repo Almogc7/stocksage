@@ -129,6 +129,48 @@ All modifications made by Claude on branch `claude/stocksage-review-20260617-120
 
 ---
 
+## Entry 12 — Security: replace example credentials with placeholders
+
+| Field | Value |
+|---|---|
+| **Commit hash** | `ef00728` |
+| **Files changed** | `.env.example` |
+| **Finding** | Real credentials were written into `.env.example` (a git-tracked file) but were NEVER staged or committed. Confirmed via `git log -S <token>` — zero commits contain the real values. The file was in the working tree only. |
+| **Action** | Restored safe placeholder values; added explicit security rules at the top of the file. |
+| **What you must do** | If the Telegram bot token was ever used outside this machine or shared, rotate it via @BotFather. The numeric chat ID is not a secret but is personal data. |
+| **Revert command** | `git revert ef00728` — **NOT recommended**: reverting would restore a file containing real credentials into the git-tracked template. |
+| **Tests** | 94/94 — all pass |
+
+---
+
+## Entry 13 — Fix: preserve runtime watchlist removals across restarts
+
+| Field | Value |
+|---|---|
+| **Commit hash** | `5f6e699` |
+| **Files changed** | `db/database.py`, `tests/test_reseed_protection.py` (new) |
+| **Bug** | `remove_from_watchlist()` used `DELETE FROM watchlist WHERE symbol = ?`. On the next application startup, `populate_from_config()` called `INSERT OR IGNORE` for every symbol in config.py. If the deleted symbol was still in config.py, the UNIQUE constraint no longer blocked it — the symbol was silently re-inserted. The `/remove` command appeared to work but its effect did not survive restarts. |
+| **Fix design** | Soft-delete: `remove_from_watchlist()` now sets `enabled = 0` and records `removed_at` timestamp instead of deleting the row. `INSERT OR IGNORE` during seeding sees the existing row (enabled=0) and leaves it untouched. `get_watchlist()` filters `WHERE enabled = 1`. `add_to_watchlist()` uses `INSERT ... ON CONFLICT DO UPDATE SET enabled = 1` so `/add` explicitly re-enables a previously removed symbol. |
+| **Migration** | `migrate_db()` adds `enabled INTEGER NOT NULL DEFAULT 1` and `removed_at TIMESTAMP DEFAULT NULL` to existing `watchlist` tables. Idempotent — safe to run on every startup. Existing rows default to `enabled = 1`. |
+| **Survival matrix** | `/add` → survives restart, git pull ✅; `/remove` → survives restart, git pull ✅; new config symbol → added on next restart ✅; removed config symbol → stays removed ✅ |
+| **Tests added** | 14 tests in `test_reseed_protection.py` covering all 12 user-specified scenarios plus 2 bonus assertions |
+| **Revert command** | `git revert 5f6e699` — safe; existing enabled=0 rows would stay disabled; DB state unaffected beyond re-enabling DELETE behavior in remove_from_watchlist() |
+| **Affects stock rankings** | No |
+| **Affects alert output** | No |
+
+---
+
+## Entry 14 — Docs: watchlist decision package
+
+| Field | Value |
+|---|---|
+| **Files changed** | `WATCHLIST_DECISION_PACKAGE.md` (new), `CLAUDE_CHANGES.md` (updated) |
+| **Contents** | Live volume/liquidity analysis of all 399 symbols; D5/D6 threshold analysis with actual percentile distributions; D16 duplicate resolution plan; D18 investigation of 18 flagged symbols; bank category handling recommendation; proposed 30-symbol ACTIVE list; proposed 5-tier classification for every symbol; 20-decision summary table; revert commands; final status table |
+| **API calls made** | yfinance fast_info fetched for all 399 symbols to compute avg daily volume and dollar volume. No paid APIs used. |
+| **Secrets displayed** | None |
+
+---
+
 ## Entry 11 — Docs: watchlist and alert design proposal
 
 | Field | Value |
