@@ -155,7 +155,12 @@ def log_alert(symbol: str, alert_type: str, message: str) -> None:
     with _connect() as conn:
         conn.execute(
             "INSERT INTO alerts (symbol, alert_type, message, triggered_at) VALUES (?, ?, ?, ?)",
-            (symbol.upper(), alert_type, message, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            # Store in SQLite-native UTC format "YYYY-MM-DD HH:MM:SS" (space, not T) so
+            # that datetime('now', 'utc', ...) comparisons work correctly via string
+            # ordering. isoformat() produces a "T" separator which sorts above " " and
+            # would make every stored timestamp appear permanently within cooldown.
+            (symbol.upper(), alert_type, message,
+             datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
         )
 
 
@@ -176,7 +181,7 @@ def get_muted_symbols(hours: int = 4) -> list[str]:
     with _connect() as conn:
         rows = conn.execute(
             "SELECT DISTINCT symbol FROM alerts"
-            " WHERE triggered_at >= datetime('now', ? || ' hours')",
+            " WHERE triggered_at >= datetime('now', 'utc', ? || ' hours')",
             (f"-{hours}",),
         ).fetchall()
     return [row["symbol"] for row in rows]
