@@ -51,6 +51,7 @@ WATCHLIST: dict[str, list[str]] = {
     "מדדים": [
         "^GSPC",   # S&P 500
         "^IXIC",   # Nasdaq Composite
+        "QQQ",     # Nasdaq 100 ETF
         "^DJI",    # Dow Jones
         "^RUT",    # Russell 2000
         "^VIX",    # מדד פחד
@@ -76,14 +77,39 @@ WATCHLIST: dict[str, list[str]] = {
     ],
 
     "AI & Semiconductors": [
+        # --- Original ---
         "NVDA",    # מוביל AI
         "AMD",
-        "INTC",    # +370% ב-12 חודשים
+        "INTC",
         "AVGO",    # Broadcom
         "ARM",     # Arm Holdings
         "QCOM",
         "MRVL",
         "ANET",    # Data center networking
+        # --- SOXX additions ---
+        "SWKS",    # Skyworks Solutions
+        "QRVO",    # Qorvo
+        "NXPI",    # NXP Semiconductors
+        "MPWR",    # Monolithic Power
+        "STM",     # STMicroelectronics
+        "MU",      # Micron Technology
+        "ONTO",    # Onto Innovation
+        "ON",      # ON Semiconductor
+        "ASX",     # ASE Technology
+        "ASML",    # ASML Holding
+        "AMAT",    # Applied Materials
+        "LSCC",    # Lattice Semiconductor
+        "ENTG",    # Entegris
+        "MKSI",    # MKS Instruments
+        "LRCX",    # Lam Research
+        "TER",     # Teradyne
+        "KLAC",    # KLA Corporation
+        "TSM",     # Taiwan Semiconductor
+        "MCHP",    # Microchip Technology
+        "TXN",     # Texas Instruments
+        "ADI",     # Analog Devices
+        "OLED",    # Universal Display
+        "UMC",     # United Microelectronics
     ],
 
     "מגה טק": [
@@ -97,11 +123,97 @@ WATCHLIST: dict[str, list[str]] = {
     ],
 
     "ענן ותוכנה": [
-        "SNOW",    # YTD: +46.9%
+        # --- Original ---
+        "SNOW",    # Snowflake
         "PLTR",    # AI/Defense
         "DDOG",    # Cloud monitoring
         "NET",     # Cloudflare
         "CRM",     # Salesforce
+        # --- IGV additions ---
+        "ORCL",    # Oracle
+        "ADBE",    # Adobe
+        "INTU",    # Intuit
+        "CDNS",    # Cadence Design
+        "SNPS",    # Synopsys
+        "NOW",     # ServiceNow
+        "ADSK",    # Autodesk
+        "EA",      # Electronic Arts
+        "TTWO",    # Take-Two Interactive
+        "ROP",     # Roper Technologies
+        "ZM",      # Zoom
+        "WDAY",    # Workday
+        "FICO",    # Fair Isaac
+        "PTC",     # PTC Inc
+        "TEAM",    # Atlassian
+        "TRMB",    # Trimble
+        "TYL",     # Tyler Technologies
+        "HUBS",    # HubSpot
+        "NTNX",    # Nutanix
+        "DT",      # Dynatrace
+        "GWRE",    # Guidewire
+        "GEN",     # Gen Digital
+        "IOT",     # Samsara
+        "DOCU",    # DocuSign
+        "RBRK",    # Rubrik
+        "U",       # Unity Software
+        "AUR",     # Aurora Innovation
+        "MANH",    # Manhattan Associates
+        "PCOR",    # Procore Technologies
+        "DSGX",    # Descartes Systems
+        "OTEX",    # OpenText
+        "YOU",     # Clear Secure
+        "BSY",     # Bentley Systems
+        "ACIW",    # ACI Worldwide
+        "ESTC",    # Elastic
+        "PATH",    # UiPath
+        "CVLT",    # Commvault
+        "DBX",     # Dropbox
+        "APPF",    # AppFolio
+        "SOUN",    # SoundHound AI
+        "GTLB",    # GitLab
+        "BOX",     # Box Inc
+        "DLB",     # Dolby Laboratories
+        "ZETA",    # Zeta Global
+        "LIF",     # Life360
+        "RNG",     # RingCentral
+        "QLYS",    # Qualys
+        "VRNS",    # Varonis
+        "PEGA",    # Pegasystems
+        "BB",      # BlackBerry
+        "BILL",    # Bill.com
+        "QTWO",    # Q2 Holdings
+        "CCC",     # Claros Mortgage (IGV)
+        "ADEA",    # Adeia
+        "TDC",     # Teradata
+        "WK",      # Workiva
+        "ALRM",    # Alarm.com
+        "KVYO",    # Klaviyo
+        "BRZE",    # Braze
+        "SPSC",    # SPS Commerce
+        "ATEN",    # A10 Networks
+        "RAMP",    # LiveRamp
+        "FRSH",    # Freshworks
+        "AGYS",    # Agilysys
+        "NCNO",    # nCino
+        "FIVN",    # Five9
+        "NN",      # NextNav
+        "BL",      # BlackLine
+        "AVPT",    # AvePoint
+        "ALKT",    # Alkami Technology
+        "BLKB",    # Blackbaud
+        "INTA",    # Intapp
+        "PRGS",    # Progress Software
+        "LSPD",    # Lightspeed Commerce
+        "AI",      # C3.ai
+        "VYX",     # NCR Voyix
+        "VERX",    # Vertex Inc
+        "APPN",    # Appian
+        "PD",      # PagerDuty
+        "CXM",     # Sprinklr
+        "ASAN",    # Asana
+        "PAR",     # PAR Technology
+        "RPD",     # Rapid7
+        "NABL",    # N-able
     ],
 
     "סייבר": [
@@ -110,6 +222,8 @@ WATCHLIST: dict[str, list[str]] = {
         "FTNT",    # Fortinet
         "ZS",      # Zscaler
         "S",       # SentinelOne
+        "TENB",    # Tenable
+        "DDOG",    # Datadog (monitoring + security)
     ],
 
     "תשתיות Data Center": [
@@ -118,7 +232,7 @@ WATCHLIST: dict[str, list[str]] = {
         "IRM",     # Iron Mountain
         "VRT",     # Vertiv
         "APLD",    # Applied Digital
-        "DOCN",    # YTD: +229%
+        "DOCN",    # DigitalOcean
         "GLW",     # Corning — Nvidia partnership
         "ETN",     # Eaton
         "MOD",     # Modine
@@ -126,7 +240,8 @@ WATCHLIST: dict[str, list[str]] = {
     ],
 
     "חלל": [
-        "RKLB",    # Rocket Lab 🔥
+        # --- Original ---
+        "RKLB",    # Rocket Lab
         "ASTS",    # AST SpaceMobile
         "LUNR",    # Intuitive Machines
         "LMT",     # Lockheed Martin
@@ -134,6 +249,30 @@ WATCHLIST: dict[str, list[str]] = {
         "PL",      # Planet Labs
         "BA",      # Boeing
         "NOC",     # Northrop Grumman
+        # --- Defense additions ---
+        "ESLT",    # Elbit Systems
+        "SWBI",    # Smith & Wesson
+        "AVAV",    # AeroVironment
+        "KTOS",    # Kratos Defense
+        "RTX",     # Raytheon Technologies
+        "HWM",     # Howmet Aerospace
+        "WWD",     # Woodward
+        "HII",     # Huntington Ingalls
+        "AXON",    # Axon Enterprise
+        "HXL",     # Hexcel
+        "CW",      # Curtiss-Wright
+        "GD",      # General Dynamics
+        "NPK",     # National Presto (defense)
+        "PSN",     # Parsons Corporation
+        "HEI",     # HEICO
+        "BWXT",    # BWX Technologies
+        "RBC",     # RBC Bearings
+        "TDG",     # TransDigm Group
+        "AIR",     # AAR Corp
+        "ONDS",    # Ondas Holdings
+        "RGR",     # Sturm Ruger
+        "MRCY",    # Mercury Systems
+        "TXT",     # Textron
     ],
 
     "אנרגיה": [
@@ -144,6 +283,7 @@ WATCHLIST: dict[str, list[str]] = {
     ],
 
     "גרעין": [
+        # --- Original ---
         "CEG",     # Constellation Energy
         "VST",     # Vistra
         "GEV",     # GE Vernova
@@ -152,19 +292,105 @@ WATCHLIST: dict[str, list[str]] = {
         "CCJ",     # Cameco — Uranium
         "SO",      # Southern Company
         "BEP",     # Brookfield Renewable
+        # --- Nuclear additions ---
+        "NNE",     # Nano Nuclear Energy
+        "DUK",     # Duke Energy
+        "NRG",     # NRG Energy
+        "URA",     # Global X Uranium ETF
+        "URNM",    # Sprott Uranium Miners ETF
+        "NLR",     # VanEck Uranium+Nuclear ETF
+        "NUKZ",    # Range Nuclear Renaissance ETF
+        "CEZ",     # CEZ Group
+        "LEU",     # Centrus Energy
+        "FCU",     # Fission Uranium
+        "EU",      # enCore Energy
+        "NXE",     # NexGen Energy
+        "UEC",     # Uranium Energy Corp
+        "UUUU",    # Energy Fuels
+        "DNN",     # Denison Mines
+        "YCA",     # Yellow Cake
+        "NEE",     # NextEra Energy
+        "PEG",     # PSEG
+        "ELE",     # Endesa
+        "KAP",     # Kazatomprom
+        "PCG",     # PG&E
+        "BOE",     # Brookfield Renewable Partners
+        "SLX",     # VanEck Steel ETF
+        "DYL",     # Deep Yellow
+        "PDN",     # Paladin Energy
     ],
 
     "אנרגיה ירוקה": [
-        "BE",      # Bloom Energy YTD: +249% 🔥
+        "BE",      # Bloom Energy
         "ENPH",    # Enphase
         "FSLR",    # First Solar
-        "NEE",     # NextEra
+        "NEE",     # NextEra Energy
     ],
 
     "פיננסים": [
+        # --- Original ---
         "JPM",     # JPMorgan
         "GS",      # Goldman Sachs
         "MSTR",    # MicroStrategy — Bitcoin play
+        # --- KRE: Small/Community Banks ---
+        "CBU",     "PFS",     "HTH",     "NBHC",    "NIC",
+        "FFBC",    "CCB",     "TOWN",    "FRME",    "LOB",
+        "PRK",     "HIFS",    "HOPE",    "NBTB",    "SYBT",
+        "LKFN",    "WABC",    "CNOB",    "STBA",    "OCFC",
+        "BY",      "OBK",     "AMAL",    "FSUN",    "PEBO",
+        "FFWM",    "HFWA",    "ORRF",    "SBSI",    "HTBK",
+        "WASH",
+        # --- KRE: Mid-Size Banks ---
+        "ABCB",    "ASB",     "AX",      "BFC",     "BHRB",
+        "BKU",     "BOKF",    "BPOP",    "BUSE",    "CATY",
+        "CFFN",    "CFR",     "CPF",     "CTBI",    "CUBI",
+        "DCOM",    "EBC",     "EFSC",    "EGBN",    "EQBK",
+        "ESQ",     "FBK",     "FBNC",    "FCF",     "FFIC",
+        "FISI",    "GSBC",    "HAFC",    "HWC",     "IBCP",
+        "KRNY",    "MBWM",    "MOFG",    "MPB",     "MSBI",
+        "NBBK",    "NBN",     "NFBK",    "ONB",     "OSBC",
+        "PFBC",    "QCRH",    "SHBI",    "SMBC",    "SRCE",
+        "STEL",    "TCBK",    "TCBX",    "TFIN",    "THFF",
+        "TMP",     "TRMK",    "TRST",    "UMBF",    "UVSP",
+        "VLY",     "WSFS",
+        # --- KRE: Larger Regional Banks ---
+        "AMTB",    "AUB",     "BANC",    "BANF",    "BANR",
+        "BBT",     "BOH",     "CAC",     "CADE",    "CASH",
+        "CBSH",    "CFG",     "CHCO",    "CLBK",    "COLB",
+        "CVBF",    "EWBC",    "FBP",     "FFIN",    "FHB",
+        "FHN",     "FIBK",    "FLG",     "FNB",     "FULT",
+        "GBCI",    "HBAN",    "HBNC",    "HOMB",    "IBOC",
+        "INDB",    "MCB",     "MTB",     "NRIM",    "NWBI",
+        "OFG",     "OZK",     "PB",      "PGC",     "PNFP",
+        "RF",      "RNST",    "SBCF",    "SFBS",    "SFNC",
+        "SSB",     "TBBK",    "TCBI",    "TFC",     "TFSL",
+        "UBSI",    "UCB",     "WAFD",    "WAL",     "WBS",
+        "WSBC",    "WTFC",    "ZION",
+    ],
+
+    "חומרי גלם": [
+        # --- Rare Earth / Critical Minerals ---
+        "USAR",    # USA Rare Earth
+        "CRML",    # Critical Metals
+        "UAMY",    # US Antimony
+        "NB",      # NioCorp Developments
+        "TMC",     # The Metals Company
+        "AREC",    # American Rare Earths
+        "MP",      # MP Materials
+        "IDR",     # Idaho Strategic Resources
+        "UUUU",    # Energy Fuels (also in גרעין)
+        "NAK",     # Northern Dynasty Minerals
+        "REMX",    # VanEck Rare Earth ETF
+        "IE",      # Ivanhoe Electric
+        "TMQ",     # Trilogy Metals
+        # --- Copper & Base Metals ---
+        "HBM",     # Hudbay Minerals
+        "SCCO",    # Southern Copper
+        "ERO",     # Ero Copper
+        "TGB",     # Taseko Mines
+        "COPX",    # Global X Copper Miners ETF
+        "FCX",     # Freeport-McMoRan
+        "CPER",    # US Copper Index Fund
     ],
 }
 
