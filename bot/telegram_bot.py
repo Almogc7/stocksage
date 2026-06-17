@@ -9,7 +9,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 from agent.core import run_morning_scan
 from analyzers.technical import full_analysis
-from config import ALERT_COOLDOWN_HOURS, ALERT_THRESHOLD_PCT, CATEGORIES, DEFAULT_LANGUAGE, WATCHLIST
+from config import (
+    ALERT_COOLDOWN_HOURS, ALERT_THRESHOLD_PCT, AUTHORIZED_CHAT_IDS,
+    CATEGORIES, DEFAULT_LANGUAGE, WATCHLIST,
+)
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
 from db.database import (
     add_to_watchlist,
@@ -25,6 +28,30 @@ from db.database import (
     remove_from_watchlist,
     set_language,
 )
+
+# ── Authorization ────────────────────────────────────────────────────────────
+
+async def _check_auth(update: Update) -> bool:
+    """
+    Return True if the request comes from an authorized chat ID.
+
+    Authorization is configured via AUTHORIZED_CHAT_IDS in config.py, which
+    reads the AUTHORIZED_CHAT_IDS env var (comma-separated IDs) and falls back
+    to TELEGRAM_CHAT_ID for single-user personal bots.
+
+    If no authorized IDs are configured at all, every request is rejected
+    (fail-secure). Unauthorized attempts are logged to stdout without
+    exposing message content or the bot token.
+    """
+    if not AUTHORIZED_CHAT_IDS:
+        print(f"[AUTH BLOCK] No AUTHORIZED_CHAT_IDS configured — rejecting all commands")
+        return False
+    chat_id = str(update.effective_chat.id)
+    if chat_id not in AUTHORIZED_CHAT_IDS:
+        print(f"[AUTH BLOCK] Unauthorized command from chat_id={chat_id}")
+        return False
+    return True
+
 
 # ── Strings ───────────────────────────────────────────────────────────────────
 
@@ -302,11 +329,15 @@ async def _send(update: Update, text: str) -> None:
 # ── Command handlers ──────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     await _send(update, STRINGS[lang]["start_welcome"])
 
 
 async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     chat_id = str(update.effective_chat.id)
     args = context.args
 
@@ -335,6 +366,8 @@ async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 
@@ -360,6 +393,8 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 
@@ -380,6 +415,8 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 
@@ -393,6 +430,8 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 
@@ -421,6 +460,8 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def cmd_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 
@@ -468,6 +509,8 @@ async def cmd_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 
@@ -496,6 +539,8 @@ async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 
@@ -524,6 +569,8 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 
@@ -541,6 +588,8 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
     sep = "━" * 19
@@ -574,6 +623,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     await _send(update, STRINGS[lang]["scan_running"])
     chat_id = str(update.effective_chat.id)
@@ -581,6 +632,8 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
     text = f"✅ {s['test_msg']} — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -589,6 +642,8 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 

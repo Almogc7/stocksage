@@ -14,6 +14,28 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# Comma-separated list of authorized Telegram chat IDs allowed to issue bot
+# commands. Set this to your own chat ID (same value as TELEGRAM_CHAT_ID for
+# a personal bot). Leave the env var unset or empty to fall back to
+# TELEGRAM_CHAT_ID only. The bot will silently ignore all other users.
+#
+# Example .env entry:
+#   AUTHORIZED_CHAT_IDS=123456789
+#
+# Multiple users (e.g. family members sharing a bot):
+#   AUTHORIZED_CHAT_IDS=123456789,987654321
+_raw_auth_ids = os.getenv("AUTHORIZED_CHAT_IDS", "")
+if _raw_auth_ids.strip():
+    AUTHORIZED_CHAT_IDS: frozenset[str] = frozenset(
+        cid.strip() for cid in _raw_auth_ids.split(",") if cid.strip()
+    )
+elif TELEGRAM_CHAT_ID:
+    # Fall back to the outbound chat ID — correct for a personal bot.
+    AUTHORIZED_CHAT_IDS = frozenset([str(TELEGRAM_CHAT_ID).strip()])
+else:
+    # No configuration at all — bot will reject every command until configured.
+    AUTHORIZED_CHAT_IDS = frozenset()
+
 # ─────────────────────────────────────────────
 #  API Keys
 # ─────────────────────────────────────────────
