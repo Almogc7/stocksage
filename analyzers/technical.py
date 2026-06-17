@@ -308,13 +308,14 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
         score += 20
         triggered.append("macd_bullish_crossover")
 
-    # +15  RSI in ideal swing zone (45–65); +5 if acceptable fringe (35–45 or 65–75)
+    # +15  RSI in ideal swing zone (45–65); +5 if in acceptable fringe (35–44 or 66–75)
     if 45 <= rsi <= 65:
         score += 15
         triggered.append("rsi_healthy_range")
-    elif rsi < 45 or rsi > 65:   # fringe zone — veto already blocked < 35 and > 75
+    else:
+        # fringe zone: 35–44 or 66–75 (veto already blocked < 35 and > 75)
         score += 5
-        triggered.append("rsi_healthy_range")
+        triggered.append("rsi_acceptable_zone")
 
     # +15  Volume spike — current volume > 1.5× 20-day average
     if _volume_spike(df):

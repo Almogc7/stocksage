@@ -130,6 +130,7 @@ _SIGNAL_LABELS: dict[str, str] = {
     "ema150_above_ema200":    "EMA200 uptrend",
     "macd_bullish_crossover": "MACD cross",
     "rsi_healthy_range":      "RSI healthy",
+    "rsi_acceptable_zone":    "RSI acceptable",
     "volume_spike":           "Volume spike",
     "stoch_rsi_bullish_cross": "Stoch RSI",
     "above_vwap":             "VWAP",
