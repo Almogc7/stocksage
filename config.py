@@ -474,3 +474,51 @@ CHART_THEME:  str = "#0d1117"
 #  /add AAPL "מגה טק"
 # ─────────────────────────────────────────────
 CATEGORIES: list[str] = list(WATCHLIST.keys())
+
+# ─────────────────────────────────────────────
+#  Watchlist Architecture
+# ─────────────────────────────────────────────
+# Maximum number of symbols in the Active tier at one time
+ACTIVE_MAX_SIZE: int = int(os.getenv("ACTIVE_MAX_SIZE", "30"))
+
+# Maximum number of bank/financial sector symbols allowed in Active
+ACTIVE_BANK_MAX: int = int(os.getenv("ACTIVE_BANK_MAX", "8"))
+
+# Minimum 3-month average daily share volume for eligibility
+ELIGIBILITY_MIN_AVG_VOLUME: int = int(os.getenv("ELIGIBILITY_MIN_AVG_VOLUME", "250000"))
+
+# Minimum average daily dollar volume (price × avg_volume) for eligibility
+ELIGIBILITY_MIN_DOLLAR_VOL: int = int(os.getenv("ELIGIBILITY_MIN_DOLLAR_VOL", "10000000"))
+
+# Minimum price for eligibility (avoids penny stocks)
+ELIGIBILITY_MIN_PRICE: float = float(os.getenv("ELIGIBILITY_MIN_PRICE", "3.0"))
+
+# Number of trading days used to compute average dollar volume (lookback)
+ELIGIBILITY_LOOKBACK_DAYS: int = int(os.getenv("ELIGIBILITY_LOOKBACK_DAYS", "63"))
+
+# Number of calendar days before last bar is considered stale
+ELIGIBILITY_STALE_DAYS: int = int(os.getenv("ELIGIBILITY_STALE_DAYS", "3"))
+
+# Minimum relevance score to qualify for ACTIVE promotion
+PROMOTION_THRESHOLD: int = int(os.getenv("PROMOTION_THRESHOLD", "60"))
+
+# Consecutive evaluations at or above PROMOTION_THRESHOLD required to promote
+PROMOTION_CONSEC_REQUIRED: int = int(os.getenv("PROMOTION_CONSEC_REQUIRED", "2"))
+
+# Relevance score below which demotion is evaluated
+DEMOTION_THRESHOLD: int = int(os.getenv("DEMOTION_THRESHOLD", "45"))
+
+# Consecutive evaluations below DEMOTION_THRESHOLD required to demote
+DEMOTION_CONSEC_REQUIRED: int = int(os.getenv("DEMOTION_CONSEC_REQUIRED", "2"))
+
+# Minimum trading days a symbol must stay in ACTIVE before demotion is eligible
+DWELL_MIN_DAYS: int = int(os.getenv("DWELL_MIN_DAYS", "5"))
+
+# Score advantage a Monitor candidate needs over lowest Active symbol to replace it
+REPLACEMENT_MARGIN: int = int(os.getenv("REPLACEMENT_MARGIN", "5"))
+
+# Whether to send BUY/SELL alerts for ETF and index symbols
+ETF_ALERTS_ENABLED: bool = os.getenv("ETF_ALERTS_ENABLED", "false").lower() == "true"
+
+# Categories considered to be bank/financial sector (used for bank-cap enforcement)
+BANK_CATEGORIES: frozenset[str] = frozenset(["פיננסים"])
