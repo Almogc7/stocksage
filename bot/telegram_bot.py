@@ -16,17 +16,23 @@ from config import (
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
 from db.database import (
     add_to_watchlist,
+    get_active_watchlist,
     get_language,
     get_muted_symbols,
+    get_symbol_status,
+    get_symbols_by_state,
     get_today_alerts,
     get_trade_summary,
     get_trades,
     get_watchlist,
+    get_watchlist_summary,
     init_db,
     log_alert,
     log_trade,
     remove_from_watchlist,
+    run_initial_classification,
     set_language,
+    update_symbol_state,
 )
 
 # ── Authorization ────────────────────────────────────────────────────────────
@@ -157,6 +163,17 @@ STRINGS: dict[str, dict[str, str]] = {
         "help_test":             "בדיקת חיבור Bot",
         "help_help":             "הצג תפריט זה",
         "help_language":         "שנה שפה",
+        # watchlist tiers
+        "wl_active_title":       "Active Watchlist",
+        "wl_monitor_title":      "Monitor Tier",
+        "wl_context_title":      "ETF/Index Context",
+        "wl_ineligible_title":   "Temporarily Ineligible",
+        "wl_status_title":       "Symbol Status",
+        "wl_not_found":          "Symbol not found in watchlist",
+        "wl_usage":              "Usage: /watchlist_status SYMBOL",
+        "wl_no_active":          "No symbols in Active tier.",
+        "wl_no_ineligible":      "No temporarily ineligible symbols.",
+        "wl_top_candidates":     "Top candidates",
     },
     "en": {
         # start
@@ -259,6 +276,17 @@ STRINGS: dict[str, dict[str, str]] = {
         "help_test":             "Connection test",
         "help_help":             "Show this menu",
         "help_language":         "Change language",
+        # watchlist tiers
+        "wl_active_title":       "Active Watchlist",
+        "wl_monitor_title":      "Monitor Tier",
+        "wl_context_title":      "ETF/Index Context",
+        "wl_ineligible_title":   "Temporarily Ineligible",
+        "wl_status_title":       "Symbol Status",
+        "wl_not_found":          "Symbol not found in watchlist",
+        "wl_usage":              "Usage: /watchlist_status SYMBOL",
+        "wl_no_active":          "No symbols in Active tier.",
+        "wl_no_ineligible":      "No temporarily ineligible symbols.",
+        "wl_top_candidates":     "Top candidates",
     },
 }
 
@@ -411,6 +439,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     add_to_watchlist(symbol, category)
+    update_symbol_state(symbol, 'MONITOR')
     await _send(update, f"✅ {symbol} {s['added']} {category}")
 
 
@@ -440,11 +469,18 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _send(update, s["watchlist_empty"])
         return
 
+    summary = get_watchlist_summary()
+    tier_line = (
+        f"Active: {summary.get('ACTIVE', 0)} | "
+        f"Monitor: {summary.get('MONITOR', 0)} | "
+        f"ETF/Index: {summary.get('ETF_INDEX_CONTEXT', 0)}\n"
+    )
+
     all_symbols = [sym for symbols in wl.values() for sym in symbols]
     await _send(update, s["fetching_prices"])
     prices = get_multiple_prices(all_symbols)
 
-    lines = [f"{s['watchlist_title']}\n"]
+    lines = [tier_line + f"{s['watchlist_title']}\n"]
     for category, symbols in wl.items():
         lines.append(f"\U0001f4c2 {category}")
         for sym in symbols:
@@ -684,6 +720,108 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _send(update, text)
 
 
+# ── Watchlist tier commands ───────────────────────────────────────────────────
+
+async def cmd_watchlist_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
+    lang = get_language(str(update.effective_chat.id))
+    s = STRINGS[lang]
+    wl = get_active_watchlist()
+    if not wl:
+        await _send(update, s["wl_no_active"])
+        return
+    lines = [f"{s['wl_active_title']}\n"]
+    for cat, symbols in sorted(wl.items()):
+        lines.append(f"\U0001f4c2 {cat}")
+        for sym in symbols:
+            status = get_symbol_status(sym)
+            score = status.get('relevance_score') if status else None
+            score_str = f" [{score}]" if score is not None else ""
+            lines.append(f"  {sym}{score_str}")
+        lines.append("")
+    await _send(update, "\n".join(lines[:35]).strip())
+
+
+async def cmd_watchlist_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
+    lang = get_language(str(update.effective_chat.id))
+    s = STRINGS[lang]
+    symbols = get_symbols_by_state('MONITOR')
+    lines = [f"{s['wl_monitor_title']} — {len(symbols)} symbols"]
+    scored = []
+    for sym in symbols:
+        status = get_symbol_status(sym)
+        if status and status.get('relevance_score') is not None:
+            scored.append((sym, status['relevance_score']))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    if scored:
+        lines.append(f"\n{s['wl_top_candidates']}:")
+        for sym, score in scored[:10]:
+            lines.append(f"  {sym} [{score}]")
+    await _send(update, "\n".join(lines))
+
+
+async def cmd_watchlist_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
+    lang = get_language(str(update.effective_chat.id))
+    s = STRINGS[lang]
+    symbols = get_symbols_by_state('ETF_INDEX_CONTEXT')
+    lines = [f"{s['wl_context_title']} ({len(symbols)} symbols)"]
+    for sym in sorted(symbols)[:25]:
+        lines.append(f"  {sym}")
+    await _send(update, "\n".join(lines))
+
+
+async def cmd_watchlist_ineligible(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
+    lang = get_language(str(update.effective_chat.id))
+    s = STRINGS[lang]
+    symbols = get_symbols_by_state('TEMPORARILY_INELIGIBLE')
+    if not symbols:
+        await _send(update, s["wl_no_ineligible"])
+        return
+    lines = [f"{s['wl_ineligible_title']} ({len(symbols)})"]
+    for sym in sorted(symbols)[:25]:
+        status = get_symbol_status(sym)
+        reason = status.get('exclusion_reason', '') if status else ''
+        lines.append(f"  {sym}: {reason}")
+    await _send(update, "\n".join(lines))
+
+
+async def cmd_watchlist_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
+    lang = get_language(str(update.effective_chat.id))
+    s = STRINGS[lang]
+    if not context.args:
+        await _send(update, s["wl_usage"])
+        return
+    symbol = context.args[0].upper()
+    status = get_symbol_status(symbol)
+    if not status:
+        await _send(update, f"{s['wl_not_found']}: {symbol}")
+        return
+    cats = ', '.join(status.get('categories', [])) or 'N/A'
+    lines = [
+        f"{s['wl_status_title']}: {symbol}",
+        f"State: {status.get('wl_state', 'N/A')}",
+        f"Type: {status.get('security_type', 'N/A')}",
+        f"Score: {status.get('relevance_score', 'N/A')}",
+        f"Categories: {cats}",
+        f"Enabled: {status.get('enabled', 'N/A')}",
+        f"Promote streak: {status.get('consec_promote_count', 0)}",
+        f"Demote streak: {status.get('consec_demote_count', 0)}",
+        f"Dwell days: {status.get('dwell_days', 0)}",
+        f"Last evaluated: {status.get('last_evaluated') or 'never'}",
+        f"Exclusion reason: {status.get('exclusion_reason') or 'none'}",
+    ]
+    await _send(update, "\n".join(lines))
+
+
 # ── Bot runner ────────────────────────────────────────────────────────────────
 
 _BOT_COMMANDS = [
@@ -705,25 +843,31 @@ _BOT_COMMANDS = [
 
 def run_bot(token: str) -> None:
     init_db(WATCHLIST)
+    run_initial_classification(WATCHLIST)
 
     async def post_init(application) -> None:
         await application.bot.set_my_commands(_BOT_COMMANDS)
 
     app = ApplicationBuilder().token(token).post_init(post_init).build()
 
-    app.add_handler(CommandHandler("start",     cmd_start))
-    app.add_handler(CommandHandler("help",      cmd_help))
-    app.add_handler(CommandHandler("language",  cmd_language))
-    app.add_handler(CommandHandler("scan",      cmd_scan))
-    app.add_handler(CommandHandler("test",      cmd_test))
-    app.add_handler(CommandHandler("analyze",   cmd_analyze))
-    app.add_handler(CommandHandler("add",       cmd_add))
-    app.add_handler(CommandHandler("remove",    cmd_remove))
-    app.add_handler(CommandHandler("watchlist", cmd_watchlist))
-    app.add_handler(CommandHandler("trade",     cmd_trade))
-    app.add_handler(CommandHandler("trades",    cmd_trades))
-    app.add_handler(CommandHandler("summary",   cmd_summary))
-    app.add_handler(CommandHandler("alerts",    cmd_alerts))
-    app.add_handler(CommandHandler("status",    cmd_status))
+    app.add_handler(CommandHandler("start",                cmd_start))
+    app.add_handler(CommandHandler("help",                 cmd_help))
+    app.add_handler(CommandHandler("language",             cmd_language))
+    app.add_handler(CommandHandler("scan",                 cmd_scan))
+    app.add_handler(CommandHandler("test",                 cmd_test))
+    app.add_handler(CommandHandler("analyze",              cmd_analyze))
+    app.add_handler(CommandHandler("add",                  cmd_add))
+    app.add_handler(CommandHandler("remove",               cmd_remove))
+    app.add_handler(CommandHandler("watchlist",            cmd_watchlist))
+    app.add_handler(CommandHandler("trade",                cmd_trade))
+    app.add_handler(CommandHandler("trades",               cmd_trades))
+    app.add_handler(CommandHandler("summary",              cmd_summary))
+    app.add_handler(CommandHandler("alerts",               cmd_alerts))
+    app.add_handler(CommandHandler("status",               cmd_status))
+    app.add_handler(CommandHandler("watchlist_active",     cmd_watchlist_active))
+    app.add_handler(CommandHandler("watchlist_monitor",    cmd_watchlist_monitor))
+    app.add_handler(CommandHandler("watchlist_context",    cmd_watchlist_context))
+    app.add_handler(CommandHandler("watchlist_ineligible", cmd_watchlist_ineligible))
+    app.add_handler(CommandHandler("watchlist_status",     cmd_watchlist_status))
 
     app.run_polling()
