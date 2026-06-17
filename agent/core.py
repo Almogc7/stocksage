@@ -266,9 +266,26 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
         triggered = analysis.get("triggered_signals", [])
         has_vol   = "volume_spike" in triggered
 
-        # Candle data reused from df — no extra fetch
-        last_close = float(df["close"].iloc[-1])
-        last_open  = float(df["open"].iloc[-1])
+        # Gate 9 candle selection — incomplete-bar bias avoidance.
+        #
+        # When the US market is open, yfinance includes today's in-progress
+        # daily session as the last row of the daily df. Its "close" is the
+        # most recent intraday price, NOT the final 4:00 PM close. Checking
+        # "green candle" (close > open) against an unfinished session is
+        # unreliable: a session that is currently green can close red.
+        # This is *incomplete-bar bias* (not look-ahead bias — no future data
+        # is used; the bar simply hasn't closed yet).
+        #
+        # When the market is closed, df.iloc[-1] IS the last completed session,
+        # so we use it directly. When the market is open, we step back one row
+        # to the previous confirmed close (df.iloc[-2]).
+        if is_market_open() and len(df) >= 2:
+            ref_candle = df.iloc[-2]
+        else:
+            ref_candle = df.iloc[-1]
+
+        last_close = float(ref_candle["close"])
+        last_open  = float(ref_candle["open"])
 
         # Gate 5: price above EMA150
         if not above_ema:
