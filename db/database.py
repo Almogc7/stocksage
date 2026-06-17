@@ -1,6 +1,6 @@
 import sqlite3
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "stocksage.db"
@@ -155,7 +155,7 @@ def log_alert(symbol: str, alert_type: str, message: str) -> None:
     with _connect() as conn:
         conn.execute(
             "INSERT INTO alerts (symbol, alert_type, message, triggered_at) VALUES (?, ?, ?, ?)",
-            (symbol.upper(), alert_type, message, datetime.utcnow().isoformat(timespec="seconds")),
+            (symbol.upper(), alert_type, message, datetime.now(timezone.utc).isoformat(timespec="seconds")),
         )
 
 
