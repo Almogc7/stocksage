@@ -171,6 +171,70 @@ All modifications made by Claude on branch `claude/stocksage-review-20260617-120
 
 ---
 
+## Entry 15 — Feat: multi-tier watchlist architecture (Commits 1–5)
+
+| Field | Value |
+|---|---|
+| **Commit 1 (DB migration)** | `d31b7e2` |
+| **Commit 2 (eligibility engine)** | `9f61940` |
+| **Commit 3 (scanner update)** | `5edd243` |
+| **Commit 4 (Telegram commands)** | `4f8570e` |
+| **Commit 5 (tests)** | `197676d` |
+| **Files changed** | `db/database.py`, `config.py`, `analyzers/eligibility.py` (new), `agent/core.py`, `bot/telegram_bot.py`, `tests/test_eligibility.py` (new), `tests/test_watchlist_states.py` (new), `tests/test_schema_migration_v2.py` (new) |
+| **New test count** | 150 total (56 new) — all pass |
+
+**Changes by file:**
+
+`config.py`:
+- Added 16 new watchlist architecture constants: ACTIVE_MAX_SIZE (30), ACTIVE_BANK_MAX (8), ELIGIBILITY_MIN_AVG_VOLUME (250000), ELIGIBILITY_MIN_DOLLAR_VOL (10M), ELIGIBILITY_MIN_PRICE (3.0), ELIGIBILITY_LOOKBACK_DAYS (63), ELIGIBILITY_STALE_DAYS (3), PROMOTION_THRESHOLD (60), PROMOTION_CONSEC_REQUIRED (2), DEMOTION_THRESHOLD (45), DEMOTION_CONSEC_REQUIRED (2), DWELL_MIN_DAYS (5), REPLACEMENT_MARGIN (5), ETF_ALERTS_ENABLED (false), BANK_CATEGORIES (frozenset)
+- All overridable via environment variables
+
+`db/database.py`:
+- `migrate_db()` extended with 12 new watchlist columns and `symbol_categories` table (both idempotent)
+- Initial wl_state assignment on migration: ETF/index/crypto → ETF_INDEX_CONTEXT, disabled → USER_REMOVED, stocks → MONITOR
+- `_seed_symbol()` and `add_to_watchlist()` now also insert into `symbol_categories`
+- `remove_from_watchlist()` now sets `wl_state = 'USER_REMOVED'`
+- `add_to_watchlist()` now resets `wl_state = 'MONITOR'` when re-enabling
+- 15 new functions: `get_active_watchlist`, `update_symbol_state`, `get_symbols_by_state`, `get_watchlist_summary`, `add_category_tag`, `get_symbol_categories`, `update_eligibility`, `update_hysteresis`, `record_state_change`, `get_symbol_status`, `increment_dwell_days`, `run_initial_classification`
+
+`analyzers/eligibility.py` (new):
+- 6 component score functions (data_quality, liquidity, trend, momentum, proximity, volatility)
+- `compute_relevance_score()`: master 0–100 integer, missing data = 0 for that component
+- `determine_state_change()`: hysteresis state machine, no DB writes, returns (state, reason)
+- `evaluate_symbol_eligibility()`: orchestrates full evaluation per symbol
+
+`agent/core.py`:
+- `check_alerts()` and `run_morning_scan()` use `get_active_watchlist()` instead of `get_watchlist()`
+- Only ACTIVE-state symbols are scanned for alerts/morning scan
+
+`bot/telegram_bot.py`:
+- 5 new authorized commands: /watchlist_active, /watchlist_monitor, /watchlist_context, /watchlist_ineligible, /watchlist_status
+- /watchlist now shows tier summary line
+- /add now calls `update_symbol_state(MONITOR)` to enter eligibility cycle
+- `run_bot()` now calls `run_initial_classification()` on startup
+
+**Watchlist states:**
+- `ACTIVE`: scanned for alerts, shown in /watchlist_active (max 30)
+- `MONITOR`: not scanned, shown in /watchlist_monitor
+- `ETF_INDEX_CONTEXT`: ETFs/indices/crypto, no BUY alerts, shown in /watchlist_context
+- `TEMPORARILY_INELIGIBLE`: no data/foreign symbols, shown in /watchlist_ineligible
+- `USER_REMOVED`: soft-deleted, only re-enabled via explicit /add
+
+**Revert commands:**
+```
+git revert 197676d  # tests
+git revert 4f8570e  # Telegram commands
+git revert 5edd243  # scanner update
+git revert 9f61940  # eligibility engine
+git revert d31b7e2  # DB migration
+```
+Note: DB schema changes require manual column removal or DB reset if reverting.
+
+| **Affects stock alerts** | Yes — only ACTIVE symbols (≤30) are now scanned instead of all 399 |
+| **Affects historical comparability** | No — opportunity score formula unchanged |
+
+---
+
 ## Entry 11 — Docs: watchlist and alert design proposal
 
 | Field | Value |
