@@ -29,7 +29,6 @@ WATCHLIST: dict[str, list[str]] = {
     "מדדים": [
         "^GSPC",   # S&P 500
         "^IXIC",   # Nasdaq Composite
-        "QQQ",     # Nasdaq 100 ETF
         "^DJI",    # Dow Jones
         "^RUT",    # Russell 2000
         "^VIX",    # מדד פחד
