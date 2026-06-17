@@ -45,42 +45,122 @@ def init_db(watchlist: dict | None = None) -> None:
                 language  TEXT DEFAULT 'he'
             );
         """)
+    # Migrate existing schema to add soft-delete columns (safe for existing DBs)
+    migrate_db()
     if watchlist:
         populate_from_config(watchlist)
 
 
-def populate_from_config(watchlist: dict) -> None:
-    """Populate watchlist from config.py on first run."""
-    for category, symbols in watchlist.items():
-        for symbol in symbols:
-            add_to_watchlist(symbol, category)
+def migrate_db() -> None:
+    """
+    Add new columns to existing databases without data loss.
+    Called automatically by init_db() before any seeding.
+
+    Columns added:
+      enabled    — 1 = active, 0 = user-removed (soft delete)
+      removed_at — UTC timestamp of when the user removed the symbol;
+                   NULL for enabled rows
+    """
+    with _connect() as conn:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()}
+        if "enabled" not in existing:
+            conn.execute(
+                "ALTER TABLE watchlist ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
+            )
+        if "removed_at" not in existing:
+            conn.execute(
+                "ALTER TABLE watchlist ADD COLUMN removed_at TIMESTAMP DEFAULT NULL"
+            )
 
 
 # ── Watchlist ────────────────────────────────────────────────────────────────
 
 def add_to_watchlist(symbol: str, category: str) -> None:
+    """
+    Add a symbol or re-enable one that was previously removed.
+
+    Used by the /add Telegram command. Unlike the seed path, this always
+    sets enabled=1 and updates the category, so a user can deliberately
+    re-add a symbol they had removed and optionally move it to a new
+    category at the same time.
+    """
     with _connect() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO watchlist (symbol, category) VALUES (?, ?)",
+            "INSERT INTO watchlist (symbol, category, enabled) VALUES (?, ?, 1)"
+            " ON CONFLICT(symbol) DO UPDATE SET"
+            "   enabled = 1,"
+            "   category = excluded.category,"
+            "   removed_at = NULL",
+            (symbol.upper(), category),
+        )
+
+
+def _seed_symbol(symbol: str, category: str) -> None:
+    """
+    Insert a symbol only if it does not already exist (enabled or removed).
+
+    INSERT OR IGNORE means:
+    - New symbol     → inserted with enabled=1
+    - Already exists (enabled=1) → row unchanged
+    - Already exists (enabled=0, user-removed) → row unchanged (NOT re-enabled)
+
+    This is the only path used during populate_from_config(). It is never
+    used by user-facing commands so that seed data can never restore
+    symbols the user has intentionally removed.
+    """
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO watchlist (symbol, category, enabled) VALUES (?, ?, 1)",
             (symbol.upper(), category),
         )
 
 
 def remove_from_watchlist(symbol: str) -> None:
+    """
+    Soft-delete: mark symbol as removed without deleting the row.
+
+    The row is kept with enabled=0 and a removed_at timestamp so that
+    future calls to populate_from_config() (via INSERT OR IGNORE) see the
+    existing row and leave it disabled. This prevents removed symbols from
+    reappearing after application restarts or git pulls.
+    """
     with _connect() as conn:
-        conn.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol.upper(),))
+        conn.execute(
+            "UPDATE watchlist SET enabled = 0, removed_at = ? WHERE symbol = ?",
+            (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), symbol.upper()),
+        )
 
 
 def get_watchlist() -> dict[str, list[str]]:
+    """Return all enabled (non-removed) symbols grouped by category."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT symbol, category FROM watchlist ORDER BY category, symbol"
+            "SELECT symbol, category FROM watchlist"
+            " WHERE enabled = 1"
+            " ORDER BY category, symbol"
         ).fetchall()
 
     result: dict[str, list[str]] = defaultdict(list)
     for row in rows:
         result[row["category"]].append(row["symbol"])
     return dict(result)
+
+
+def populate_from_config(watchlist: dict) -> None:
+    """
+    Seed the watchlist from the default configuration.
+
+    Uses _seed_symbol() (INSERT OR IGNORE) so that:
+    - On a fresh empty database: all symbols are inserted.
+    - On a database with existing rows: existing rows are untouched.
+    - On a database with removed rows (enabled=0): removed symbols are NOT
+      re-enabled. The user's removal decision is preserved.
+
+    Safe to call on every startup — idempotent by design.
+    """
+    for category, symbols in watchlist.items():
+        for symbol in symbols:
+            _seed_symbol(symbol, category)
 
 
 # ── Trades ───────────────────────────────────────────────────────────────────
