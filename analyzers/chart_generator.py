@@ -1,5 +1,6 @@
 import pandas as pd
 import plotly.graph_objects as go
+import ta
 from plotly.subplots import make_subplots
 
 from config import CHART_HEIGHT, CHART_SCALE, CHART_THEME, CHART_WIDTH
@@ -28,10 +29,11 @@ def generate_chart_image(symbol: str, df: pd.DataFrame, analysis: dict) -> bytes
         ma150 = df["close"].ewm(span=150, adjust=False).mean().tail(90)
         ma200 = df["close"].ewm(span=200, adjust=False).mean().tail(90)
 
-        delta = df["close"].diff()
-        gain  = delta.clip(lower=0).rolling(14).mean()
-        loss  = (-delta).clip(lower=0).rolling(14).mean()
-        rsi   = (100 - 100 / (1 + gain / loss)).tail(90)
+        # Use ta.momentum.rsi (Wilder's smoothing / EWM alpha=1/14) to match
+        # the RSI produced by analyzers/technical.py. The previous implementation
+        # used a simple rolling mean of gains/losses, which diverges from Wilder's
+        # method and produced chart RSI values that differed from the scored RSI.
+        rsi = ta.momentum.rsi(df["close"], window=14).tail(90)
 
         # ── Subplots ──────────────────────────────────────────────────────────
         fig = make_subplots(
