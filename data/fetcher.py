@@ -16,11 +16,18 @@ def get_current_price(symbol: str) -> dict | None:
         prev_close = info.previous_close
         change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0.0
 
+        # three_month_average_volume is None for indices (^VIX, ^GSPC, etc.)
+        # and some ETFs; can also be NaN. Coerce safely to int, defaulting to 0.
+        avg_vol = info.three_month_average_volume
+        try:
+            volume = int(avg_vol) if avg_vol is not None else 0
+        except (TypeError, ValueError):
+            volume = 0
         return {
             "symbol": symbol.upper(),
             "price": round(price, 4),
             "change_pct": round(change_pct, 2),
-            "volume": info.three_month_average_volume,
+            "volume": volume,
             "high": round(info.day_high, 4),
             "low": round(info.day_low, 4),
             "open": round(info.open, 4),
