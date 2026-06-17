@@ -25,7 +25,7 @@ from config import (
     SCAN_TOP_N,
 )
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
-from db.database import get_language, get_today_alerts, get_watchlist, log_alert, was_alerted_recently
+from db.database import get_active_watchlist, get_language, get_today_alerts, log_alert, was_alerted_recently
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
 
@@ -184,18 +184,13 @@ _SCAN_SKIP_CATEGORIES = {"מדדים", "ETFs"}
 
 
 async def run_morning_scan(bot: Bot, chat_id: str) -> None:
-    print(f"[SCAN] Starting morning scan across watchlist...")
-    wl = get_watchlist()
+    print(f"[SCAN] Starting morning scan across active watchlist...")
+    wl = get_active_watchlist()  # only ACTIVE tier symbols
 
-    # Build eligible symbol list: skip index/ETF categories and ^ tickers
-    eligible = [
-        s
-        for cat, symbols in wl.items()
-        if cat not in _SCAN_SKIP_CATEGORIES
-        for s in symbols
-        if not s.startswith("^")
-    ]
-    print(f"[SCAN] {len(eligible)} eligible symbols after filtering indices/ETFs")
+    # Build eligible symbol list from ACTIVE tier
+    # (ETFs/indices are in ETF_INDEX_CONTEXT state and never appear here)
+    eligible = [s for symbols in wl.values() for s in symbols]
+    print(f"[SCAN] {len(eligible)} eligible symbols in Active tier")
 
     results: list[dict] = []
     for symbol in eligible:
@@ -224,7 +219,7 @@ async def run_morning_scan(bot: Bot, chat_id: str) -> None:
 
 async def check_alerts(bot: Bot, chat_id: str) -> None:
     """Single unified alert loop — all 9 swing-trade conditions must pass."""
-    wl = get_watchlist()
+    wl = get_active_watchlist()  # only ACTIVE tier symbols
     all_symbols = [s for symbols in wl.values() for s in symbols]
     if not all_symbols:
         return
