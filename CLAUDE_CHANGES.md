@@ -677,3 +677,100 @@ specific applied change needs manual correction).
 `run_watchlist_evaluation(apply=True)` automatically. It is only reachable
 via direct import or the CLI script with explicit `--apply --yes`, and was
 not run against the real production DB this session.
+
+## Entry 21 — Feat: add rollback support for watchlist evaluation runs (Phase 5.5)
+
+| Field | Value |
+|---|---|
+| **Commit** | (pending — see `git log` after commit) |
+| **Files changed** | `db/database.py` (v5 migration + `apply_evaluation_changes` extended + `get_changes_for_run`/`apply_rollback`), `services/watchlist_evaluator.py` (audit capture + `rollback_evaluation_run`), `scripts/rollback_evaluation_run.py` (new), `tests/test_watchlist_rollback.py` (new), `CLAUDE_CHANGES.md` |
+| **New test count** | 288 total (23 new) — all pass |
+
+A successful Phase 5 apply run previously had no built-in undo — only
+manual SQL. This phase adds a real audit trail and a safe, conflict-aware
+rollback.
+
+**Schema (v5 migration, idempotent):** new `evaluation_run_changes` table
+— `run_id`, `symbol`, `change_type` (promotion/demotion/ineligible/
+recovery/score_update/counter_update/metadata_update), `previous_values_json`,
+`new_values_json`, `changed_columns_json`, `created_at`, `dry_run`,
+`triggered_by`, `rollback_available`, `rolled_back_at`, `rollback_run_id`,
+`rollback_status`. Indexed on `run_id`. Never written for dry-run runs —
+only apply mode creates audit rows, one per symbol actually written
+(symbols left untouched due to a transient provider failure get no audit
+row either, matching Phase 5's "leave it alone" behavior for those).
+
+**Atomicity (the core safety property):** `db.apply_evaluation_changes()`
+now writes the watchlist UPDATEs **and** the matching audit INSERTs in the
+**same transaction** — confirmed live during manual validation: a copy
+that hadn't yet run the v5 migration caused the audit INSERT to fail
+mid-transaction, and the watchlist UPDATE that would have preceded it was
+correctly rolled back too (`relevance_score` stayed `NULL`). Rollback
+itself (`db.apply_rollback()`) restores the watchlist rows and marks the
+audit rows `rolled_back` in one transaction the same way.
+
+**`services/watchlist_evaluator.rollback_evaluation_run(run_id)`:**
+1. Loads the run and its audit rows; raises `RollbackError` for an unknown
+   run_id, a dry-run run_id, or a run already marked rolled back.
+2. For every audited symbol, compares its **current** watchlist values
+   against the audit row's `new_values` — if anything differs (a manual
+   edit, or a later run, touched that row since), the **entire** rollback
+   is aborted with `status='conflict'` and every conflicting symbol/column
+   reported. Nothing is written when there's a conflict.
+3. If clean, restores every symbol's `previous_values` and marks the audit
+   rows rolled back atomically, then records a new `evaluation_runs` row
+   (`metadata_json: {"rollback_of_run_id": run_id}`) representing the
+   rollback action itself.
+
+**Change-type classification:** promotion (→ACTIVE), demotion (ACTIVE→MONITOR),
+ineligible (→TEMPORARILY_INELIGIBLE), recovery (TEMPORARILY_INELIGIBLE→MONITOR),
+counter_update (no transition, hysteresis counters changed — the common
+case for a healthy retained symbol), score_update (fallback, no counter
+change). `metadata_update` is reserved for future use (not currently
+reachable — Phase 5.5 never changes category tags or other pure metadata).
+
+**CLI — `scripts/rollback_evaluation_run.py`:** `--run-id` is required;
+without `--yes` it only previews which symbols would be restored and
+writes nothing. Never imports the bot.
+
+**Manual validation (real yfinance, copied DB only):**
+1. Copied `db/stocksage.db` → ran `migrate_db()` on the **copy only** (the
+   real file doesn't have the v5 table yet — confirmed after cleanup, see
+   below).
+2. **Apply #1** (run_id 2): 62/62 evaluated, 62 audit rows created
+   (`counter_update`), 0 promotions (hysteresis warm-up, as in Phase 4.5/5).
+3. **Apply #2** (run_id 3): 30 promotions (same top-30 set as Phase 5's
+   validation). 62 audit rows for this run too.
+4. **Rollback run_id 3**: `status=success`, 62 symbols restored — `NVDA`,
+   `VRT`, and all 30 promoted symbols confirmed back at `MONITOR`;
+   `get_watchlist_summary()` returned to `{ETF_INDEX_CONTEXT: 18, MONITOR: 62}`,
+   exactly the post-apply-#1 state.
+5. Confirmed the **real** `db/stocksage.db` was untouched throughout: same
+   mtime, same row counts, and it still doesn't even have the
+   `evaluation_run_changes` table (proving `migrate_db()` was never run
+   against it this session). The copy was deleted afterward and never
+   committed (`db/*.db` is gitignored).
+
+**Limitations:**
+- Conflict detection compares exact column values; it cannot distinguish
+  "someone reverted to the same value on purpose" from "nothing changed" —
+  both look identical and are correctly treated as no-conflict.
+- Rollback is all-or-nothing per run: a single conflicting symbol blocks
+  rolling back any of that run's other (non-conflicting) symbols, by
+  design — partial rollback was explicitly disallowed by the spec.
+- There is no "rollback of a rollback" helper yet; the rollback action's
+  own `evaluation_runs` row has no audit trail of its own (it doesn't
+  change watchlist rows beyond what it restores, so nothing further to
+  audit).
+
+**Revert command:**
+```
+git revert <commit-hash-of-this-entry>
+```
+Note: adds a new table and extends one function's signature with an
+optional parameter (backward compatible — existing single-argument calls
+still work); does not modify any existing column, so reverting is safe.
+
+**Affects production behavior** | Not yet — nothing calls
+`rollback_evaluation_run()` automatically, and apply mode was not run
+against the real production DB this session (only its gitignored copy).

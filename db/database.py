@@ -90,6 +90,10 @@ def migrate_db() -> None:
     New table in v4:
       evaluation_runs — bookkeeping for watchlist eligibility refresh runs
       (manual/scheduled/dry_run/startup). Never modifies the watchlist table.
+
+    New table in v5:
+      evaluation_run_changes — per-symbol audit trail for apply-mode runs,
+      enabling rollback_evaluation_run(). Never written for dry-run runs.
     """
     with _connect() as conn:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()}
@@ -178,6 +182,37 @@ def migrate_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_evaluation_runs_status_started"
             " ON evaluation_runs(status, started_at)"
+        )
+
+        # v5 table — per-symbol audit trail for apply-mode evaluation runs
+        # (Phase 5.5). Lets a successful apply run be safely rolled back.
+        # Never written for dry-run runs. Never modifies watchlist rows
+        # itself — only db.apply_evaluation_changes()/rollback writers do.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS evaluation_run_changes (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id                INTEGER NOT NULL,
+                symbol                TEXT NOT NULL,
+                change_type           TEXT NOT NULL
+                                       CHECK(change_type IN ('promotion', 'demotion', 'ineligible',
+                                             'recovery', 'score_update', 'counter_update', 'metadata_update')),
+                previous_values_json  TEXT NOT NULL,
+                new_values_json       TEXT NOT NULL,
+                changed_columns_json  TEXT NOT NULL,
+                created_at            TIMESTAMP NOT NULL,
+                dry_run               INTEGER NOT NULL DEFAULT 0,
+                triggered_by          TEXT DEFAULT NULL,
+                rollback_available    INTEGER NOT NULL DEFAULT 1,
+                rolled_back_at        TIMESTAMP DEFAULT NULL,
+                rollback_run_id       INTEGER DEFAULT NULL,
+                rollback_status       TEXT DEFAULT NULL
+                                       CHECK(rollback_status IS NULL OR rollback_status IN
+                                             ('rolled_back', 'conflict', 'failed'))
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_evaluation_run_changes_run_id"
+            " ON evaluation_run_changes(run_id)"
         )
 
         # v2 table
@@ -365,21 +400,28 @@ _APPLY_EVALUATION_ALLOWED_COLUMNS: frozenset[str] = frozenset({
 })
 
 
-def apply_evaluation_changes(updates: list[dict]) -> None:
+def apply_evaluation_changes(updates: list[dict], audit_entries: list[dict] | None = None) -> None:
     """
     Atomically write a batch of watchlist column updates computed by
-    services/watchlist_evaluator.py's apply mode (Phase 5).
+    services/watchlist_evaluator.py's apply mode (Phase 5), plus the
+    matching audit_entries rows for evaluation_run_changes (Phase 5.5) —
+    in the SAME transaction, so the watchlist write and its audit trail
+    can never go out of sync (one without the other).
 
     Every update dict must contain "symbol" plus any subset of the allowed
     columns above. All updates are written using ONE connection/transaction:
     if any single UPDATE raises, sqlite3's context-manager rollback discards
     every change made so far in this call — no partial apply can persist.
 
+    Each audit_entries dict must contain: run_id, symbol, change_type,
+    previous_values_json, new_values_json, changed_columns_json,
+    created_at, dry_run, triggered_by.
+
     Callers are responsible for never including USER_REMOVED symbols or any
     column not in this allowlist (unknown keys raise immediately, before
     any write happens, so a bad batch never gets partially applied either).
     """
-    if not updates:
+    if not updates and not audit_entries:
         return
 
     for upd in updates:
@@ -397,6 +439,20 @@ def apply_evaluation_changes(updates: list[dict]) -> None:
             params = list(fields.values()) + [symbol]
             conn.execute(f"UPDATE watchlist SET {set_clause} WHERE symbol = ?", params)
 
+        for entry in audit_entries or []:
+            conn.execute(
+                """INSERT INTO evaluation_run_changes
+                   (run_id, symbol, change_type, previous_values_json, new_values_json,
+                    changed_columns_json, created_at, dry_run, triggered_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    entry["run_id"], entry["symbol"].upper(), entry["change_type"],
+                    entry["previous_values_json"], entry["new_values_json"],
+                    entry["changed_columns_json"], entry["created_at"],
+                    1 if entry.get("dry_run") else 0, entry.get("triggered_by"),
+                ),
+            )
+
 
 def get_unclassified_symbols() -> list[str]:
     """Return enabled=1 symbols that have never been through
@@ -407,6 +463,52 @@ def get_unclassified_symbols() -> list[str]:
             "SELECT symbol FROM watchlist WHERE wl_classified = 0 AND enabled = 1 ORDER BY symbol"
         ).fetchall()
     return [row["symbol"] for row in rows]
+
+
+def get_changes_for_run(run_id: int) -> list[dict]:
+    """Read-only: all audit rows recorded for one apply-mode evaluation run."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM evaluation_run_changes WHERE run_id = ? ORDER BY id", (run_id,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def apply_rollback(
+    run_id: int, restores: list[dict], rollback_run_id: int, now_str: str
+) -> None:
+    """
+    Atomically restore watchlist rows to their previous_values and mark
+    every evaluation_run_changes row for this run as rolled back, in ONE
+    transaction. Callers (services/watchlist_evaluator.rollback_evaluation_run)
+    are responsible for conflict detection BEFORE calling this — this
+    function performs no validation beyond the column allowlist, by design,
+    so it stays a pure, simple atomic writer.
+
+    Each restore dict must contain "symbol" plus any subset of the
+    watchlist columns to set back to their previous values.
+    """
+    for upd in restores:
+        for key in upd:
+            if key != "symbol" and key not in _APPLY_EVALUATION_ALLOWED_COLUMNS:
+                raise ValueError(f"Unknown watchlist column in rollback restore: {key!r}")
+
+    with _connect() as conn:
+        for upd in restores:
+            symbol = upd["symbol"].upper()
+            fields = {k: v for k, v in upd.items() if k != "symbol"}
+            if not fields:
+                continue
+            set_clause = ", ".join(f"{k} = ?" for k in fields)
+            params = list(fields.values()) + [symbol]
+            conn.execute(f"UPDATE watchlist SET {set_clause} WHERE symbol = ?", params)
+
+        conn.execute(
+            "UPDATE evaluation_run_changes"
+            " SET rolled_back_at = ?, rollback_run_id = ?, rollback_status = 'rolled_back'"
+            " WHERE run_id = ?",
+            (now_str, rollback_run_id, run_id),
+        )
 
 
 def get_watchlist_summary() -> dict[str, int]:

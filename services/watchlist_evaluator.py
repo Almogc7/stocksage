@@ -67,6 +67,7 @@ Provider-outage suppression (documented scope):
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -132,6 +133,8 @@ class SymbolEvalResult:
     # anything for this symbol" (skipped, or a transient provider failure
     # we must leave untouched). Not part of the dry-run reporting contract.
     db_fields: dict | None = field(default=None, repr=False, compare=False)
+    prev_fields: dict | None = field(default=None, repr=False, compare=False)
+    change_type: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -307,6 +310,37 @@ def _build_db_fields(
     return fields
 
 
+def _classify_change_type(current_state: str, proposed_state: str, fields: dict) -> str:
+    """Audit change_type for one symbol's apply-mode write (Phase 5.5)."""
+    if proposed_state == "ACTIVE" and current_state != "ACTIVE":
+        return "promotion"
+    if current_state == "ACTIVE" and proposed_state == "MONITOR":
+        return "demotion"
+    if proposed_state == "TEMPORARILY_INELIGIBLE":
+        return "ineligible"
+    if current_state == "TEMPORARILY_INELIGIBLE" and proposed_state == "MONITOR":
+        return "recovery"
+    if "consec_promote_count" in fields or "consec_demote_count" in fields:
+        return "counter_update"
+    return "score_update"
+
+
+def _set_db_fields(
+    sr: SymbolEvalResult, row: dict, market_result, score: int,
+    current_state: str, proposed_state: str, reason: str, now_str: str,
+) -> None:
+    """
+    Compute and attach this symbol's apply-mode persistence fields
+    (db_fields), their previous values (prev_fields, for rollback), and an
+    audit change_type — onto its SymbolEvalResult. Harmless to compute in
+    dry-run mode too (nothing reads these fields unless apply=True).
+    """
+    fields = _build_db_fields(row, market_result, score, current_state, proposed_state, reason, now_str)
+    sr.db_fields = fields
+    sr.prev_fields = {k: row.get(k) for k in fields if k != "symbol" and k in row}
+    sr.change_type = _classify_change_type(current_state, proposed_state, fields)
+
+
 def run_dry_run_evaluation(
     *,
     client: MarketDataClient | None = None,
@@ -369,11 +403,27 @@ def run_watchlist_evaluation(
     try:
         _run(result, client, today_str, now)
         if apply:
-            updates = [
-                sr.db_fields for sr in result.symbol_results
-                if sr.db_fields is not None
+            changed = [sr for sr in result.symbol_results if sr.db_fields is not None]
+            updates = [sr.db_fields for sr in changed]
+            audit_entries = [
+                {
+                    "run_id": run_id,
+                    "symbol": sr.symbol,
+                    "change_type": sr.change_type,
+                    "previous_values_json": json.dumps(sr.prev_fields, default=str),
+                    "new_values_json": json.dumps(
+                        {k: v for k, v in sr.db_fields.items() if k != "symbol"}, default=str
+                    ),
+                    "changed_columns_json": json.dumps(
+                        [k for k in sr.db_fields if k != "symbol"]
+                    ),
+                    "created_at": started_at,
+                    "dry_run": False,
+                    "triggered_by": triggered_by,
+                }
+                for sr in changed
             ]
-            db.apply_evaluation_changes(updates)
+            db.apply_evaluation_changes(updates, audit_entries)
             result.applied = True
     except Exception as exc:  # fatal error — never leave a half-applied run
         result.fatal_error = f"{type(exc).__name__}: {exc}"
@@ -553,9 +603,7 @@ def _run(
 
         sr.proposed_state = new_state
         sr.reason = reason
-        sr.db_fields = _build_db_fields(
-            row, market_results[sym], sr.relevance_score, "ACTIVE", new_state, reason, now_str
-        )
+        _set_db_fields(sr, row, market_results[sym], sr.relevance_score, "ACTIVE", new_state, reason, now_str)
         if new_state == "ACTIVE":
             tracker.add(sym, sr.relevance_score, _is_bank(row["categories"]))
         elif new_state == "MONITOR":
@@ -598,16 +646,12 @@ def _run(
         elif eval_out["new_state"] == "TEMPORARILY_INELIGIBLE":
             sr.proposed_state = "TEMPORARILY_INELIGIBLE"
             sr.reason = eval_out["reason"]
-            sr.db_fields = _build_db_fields(
-                row, mr, sr.relevance_score, "MONITOR", "TEMPORARILY_INELIGIBLE", sr.reason, now_str
-            )
+            _set_db_fields(sr, row, mr, sr.relevance_score, "MONITOR", "TEMPORARILY_INELIGIBLE", sr.reason, now_str)
             result.proposed_ineligible.append(sym)
         else:
             sr.proposed_state = "MONITOR"
             sr.reason = eval_out["reason"]
-            sr.db_fields = _build_db_fields(
-                row, mr, sr.relevance_score, "MONITOR", "MONITOR", sr.reason, now_str
-            )
+            _set_db_fields(sr, row, mr, sr.relevance_score, "MONITOR", "MONITOR", sr.reason, now_str)
         results_by_symbol[sym] = sr
 
     # TEMPORARILY_INELIGIBLE candidates whose retry time has arrived. A
@@ -638,9 +682,7 @@ def _run(
         sr.hard_eligibility_passed = True
         sr.proposed_state = "MONITOR"
         sr.reason = "recovered: data valid again; returning to MONITOR for normal promotion cycle"
-        sr.db_fields = _build_db_fields(
-            row, mr, sr.relevance_score, "TEMPORARILY_INELIGIBLE", "MONITOR", sr.reason, now_str
-        )
+        _set_db_fields(sr, row, mr, sr.relevance_score, "TEMPORARILY_INELIGIBLE", "MONITOR", sr.reason, now_str)
         result.proposed_recoveries.append(sym)
         results_by_symbol[sym] = sr
 
@@ -674,25 +716,21 @@ def _run(
                     evicted_result.proposed_state = "MONITOR"
                     evicted_result.reason = f"replaced by higher-scoring candidate {sym} (score {score})"
                     evicted_row = rows_by_symbol[evicted_symbol]
-                    evicted_result.db_fields = _build_db_fields(
-                        evicted_row, market_results[evicted_symbol], evicted_result.relevance_score,
-                        "ACTIVE", "MONITOR", evicted_result.reason, now_str,
+                    _set_db_fields(
+                        evicted_result, evicted_row, market_results[evicted_symbol],
+                        evicted_result.relevance_score, "ACTIVE", "MONITOR", evicted_result.reason, now_str,
                     )
                     if evicted_symbol not in result.proposed_demotions:
                         result.proposed_demotions.append(evicted_symbol)
             tracker.add(sym, score, _is_bank(row["categories"]))
             sr.proposed_state = "ACTIVE"
             sr.reason = reason
-            sr.db_fields = _build_db_fields(
-                row, market_results[sym], score, "MONITOR", "ACTIVE", reason, now_str
-            )
+            _set_db_fields(sr, row, market_results[sym], score, "MONITOR", "ACTIVE", reason, now_str)
             result.proposed_promotions.append(sym)
         else:
             sr.proposed_state = new_state
             sr.reason = reason
-            sr.db_fields = _build_db_fields(
-                row, market_results[sym], score, "MONITOR", new_state, reason, now_str
-            )
+            _set_db_fields(sr, row, market_results[sym], score, "MONITOR", new_state, reason, now_str)
 
     result.symbol_results.extend(results_by_symbol.values())
     result.active_after = tracker.count
@@ -754,13 +792,100 @@ def _apply_failure_outcome(
     elif current_state == "TEMPORARILY_INELIGIBLE":
         sr.proposed_state = "TEMPORARILY_INELIGIBLE"
         sr.reason = f"still ineligible: {market_result.failure_reason}"
-        sr.db_fields = _build_db_fields(
-            row, market_result, 0, "TEMPORARILY_INELIGIBLE", "TEMPORARILY_INELIGIBLE", sr.reason, now_str
+        _set_db_fields(
+            sr, row, market_result, 0, "TEMPORARILY_INELIGIBLE", "TEMPORARILY_INELIGIBLE", sr.reason, now_str
         )
     else:
         sr.proposed_state = "TEMPORARILY_INELIGIBLE"
         sr.reason = f"data-quality failure: {market_result.failure_reason}"
-        sr.db_fields = _build_db_fields(
-            row, market_result, 0, current_state, "TEMPORARILY_INELIGIBLE", sr.reason, now_str
-        )
+        _set_db_fields(sr, row, market_result, 0, current_state, "TEMPORARILY_INELIGIBLE", sr.reason, now_str)
         result.proposed_ineligible.append(sr.symbol)
+
+
+class RollbackError(Exception):
+    """Raised when rollback_evaluation_run() refuses to proceed (unknown run,
+    dry-run run, already rolled back). Conflicts are NOT raised as an
+    exception — they're returned in the result dict, since a conflict is an
+    expected, reportable outcome rather than a programming error."""
+
+
+def _values_differ(a, b) -> bool:
+    # SQLite round-trips ints/floats/strings/None faithfully; a plain
+    # inequality check is sufficient and avoids any false-positive coercion.
+    return a != b
+
+
+def rollback_evaluation_run(run_id: int, *, triggered_by: str = "manual") -> dict:
+    """
+    Roll back one successful apply-mode evaluation run (Phase 5.5).
+
+    Steps (see module docstring / CLAUDE_CHANGES.md Entry for full spec):
+      1. Load the run and its audit rows (evaluation_run_changes).
+      2. Refuse unknown run_id, dry-run run_id, or an already-rolled-back run.
+      3. For every audited symbol, compare its CURRENT watchlist values
+         against the audit row's new_values — if anything differs (a manual
+         edit, or a later run, touched it since), abort the ENTIRE rollback
+         with status='conflict' and report every conflicting symbol. No
+         partial rollback is ever written.
+      4. If there are no conflicts, restore every symbol's previous_values
+         and mark every audit row rolled_back in ONE atomic transaction
+         (db.apply_rollback).
+      5. Record a new evaluation_runs row representing the rollback action
+         itself, tagged in metadata_json with the run_id it rolled back.
+
+    Returns a dict: {"status": "success"|"conflict"|"noop", "run_id": ...,
+    "rollback_run_id": ..., "restored_symbols": [...], "conflicts": [...]}.
+    """
+    run = db.get_evaluation_run(run_id)
+    if run is None:
+        raise RollbackError(f"No evaluation run with id {run_id}")
+    if run["dry_run"]:
+        raise RollbackError(f"Run {run_id} was a dry-run — nothing was ever written, nothing to roll back")
+
+    changes = db.get_changes_for_run(run_id)
+    if not changes:
+        return {"status": "noop", "run_id": run_id, "restored_symbols": [], "conflicts": []}
+
+    if any(c["rollback_status"] == "rolled_back" for c in changes):
+        raise RollbackError(f"Run {run_id} has already been rolled back")
+
+    conflicts = []
+    restores = []
+    for change in changes:
+        current = db.get_symbol_status(change["symbol"])
+        new_values = json.loads(change["new_values_json"])
+        changed_columns = json.loads(change["changed_columns_json"])
+        mismatched = {
+            col: {"expected": new_values.get(col), "actual": current.get(col)}
+            for col in changed_columns
+            if _values_differ(current.get(col), new_values.get(col))
+        }
+        if mismatched:
+            conflicts.append({"symbol": change["symbol"], "mismatched_columns": mismatched})
+        else:
+            previous_values = json.loads(change["previous_values_json"])
+            restores.append({"symbol": change["symbol"], **previous_values})
+
+    if conflicts:
+        return {"status": "conflict", "run_id": run_id, "restored_symbols": [], "conflicts": conflicts}
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    restored_symbols = [r["symbol"] for r in restores]
+    rollback_run_id = db.create_evaluation_run(
+        "manual", dry_run=False, triggered_by=triggered_by,
+        metadata={"rollback_of_run_id": run_id},
+    )
+    try:
+        db.apply_rollback(run_id, restores, rollback_run_id, now_str)
+    except Exception as exc:
+        db.update_evaluation_run_failure(rollback_run_id, f"{type(exc).__name__}: {exc}")
+        raise
+
+    db.update_evaluation_run_success(
+        rollback_run_id,
+        metadata={"rollback_of_run_id": run_id, "restored_symbols": restored_symbols},
+    )
+    return {
+        "status": "success", "run_id": run_id, "rollback_run_id": rollback_run_id,
+        "restored_symbols": restored_symbols, "conflicts": [],
+    }
