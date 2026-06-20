@@ -588,3 +588,17 @@ WATCHLIST_SCHEDULE_STUCK_RUN_TIMEOUT_MINUTES: int = int(
 WATCHLIST_EXTRA_HOLIDAY_DATES: frozenset[str] = frozenset(
     d.strip() for d in os.getenv("WATCHLIST_EXTRA_HOLIDAY_DATES", "").split(",") if d.strip()
 )
+
+# ─────────────────────────────────────────────
+#  Telegram watchlist refresh commands (Phase 7 — bot/telegram_bot.py)
+# ─────────────────────────────────────────────
+# /refresh_watchlist apply is rejected outright unless this is true. Even
+# when true, the command additionally requires the literal word "confirm"
+# (e.g. "/refresh_watchlist apply confirm") — this flag alone is not enough
+# to let a bare "/refresh_watchlist apply" write anything.
+TELEGRAM_ALLOW_WATCHLIST_APPLY: bool = os.getenv("TELEGRAM_ALLOW_WATCHLIST_APPLY", "false").lower() == "true"
+
+# Default/maximum number of symbols listed per change-type bucket in
+# /watchlist_changes before truncating with "...and N more".
+WATCHLIST_CHANGES_DEFAULT_LIMIT: int = int(os.getenv("WATCHLIST_CHANGES_DEFAULT_LIMIT", "20"))
+WATCHLIST_CHANGES_MAX_LIMIT: int = int(os.getenv("WATCHLIST_CHANGES_MAX_LIMIT", "100"))

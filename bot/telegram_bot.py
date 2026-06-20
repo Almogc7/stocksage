@@ -11,13 +11,17 @@ from agent.core import run_morning_scan
 from analyzers.technical import full_analysis
 from config import (
     ALERT_COOLDOWN_HOURS, ALERT_THRESHOLD_PCT, AUTHORIZED_CHAT_IDS,
-    CATEGORIES, DEFAULT_LANGUAGE, WATCHLIST,
+    CATEGORIES, DEFAULT_LANGUAGE, TELEGRAM_ALLOW_WATCHLIST_APPLY,
+    WATCHLIST, WATCHLIST_CHANGES_DEFAULT_LIMIT, WATCHLIST_CHANGES_MAX_LIMIT,
 )
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
 from db.database import (
     add_to_watchlist,
     get_active_watchlist,
+    get_evaluation_run,
+    get_in_progress_evaluation_run,
     get_language,
+    get_last_evaluation_run,
     get_muted_symbols,
     get_symbol_status,
     get_symbols_by_state,
@@ -27,6 +31,7 @@ from db.database import (
     get_watchlist,
     get_watchlist_summary,
     init_db,
+    list_recent_evaluation_runs,
     log_alert,
     log_trade,
     remove_from_watchlist,
@@ -34,6 +39,8 @@ from db.database import (
     set_language,
     update_symbol_state,
 )
+from services.watchlist_evaluator import run_watchlist_evaluation
+from services.watchlist_scheduler import can_start_evaluation_run, get_last_successful_scheduled_evaluation
 
 # ── Authorization ────────────────────────────────────────────────────────────
 
@@ -822,6 +829,224 @@ async def cmd_watchlist_status(update: Update, context: ContextTypes.DEFAULT_TYP
     await _send(update, "\n".join(lines))
 
 
+# ── Watchlist evaluation refresh (Phase 7) ────────────────────────────────────
+#
+# /refresh_watchlist, /watchlist_refresh_status, /watchlist_changes.
+# Default is always dry-run. Apply requires TELEGRAM_ALLOW_WATCHLIST_APPLY=true
+# in config AND the literal word "confirm" in the command — neither alone
+# is enough. No exception is ever shown raw to the user; everything is
+# caught and logged to stdout (never to Telegram) with only the exception
+# type name surfaced, never secrets/paths/stack traces.
+
+def _format_symbol_list(symbols: list[str], limit: int) -> str:
+    if not symbols:
+        return "—"
+    shown = symbols[:limit]
+    text = ", ".join(shown)
+    remaining = len(symbols) - len(shown)
+    if remaining > 0:
+        text += f" (+{remaining} more)"
+    return text
+
+
+def _format_refresh_summary(result, apply_mode: bool, run_status: str) -> str:
+    if result.fatal_error:
+        return (
+            "⚠️ Watchlist refresh failed\n\n"
+            f"Run ID: {result.run_id}\n"
+            "An internal error occurred and no watchlist state was changed.\n"
+            "Check the server logs for details."
+        )
+
+    if run_status == "partial_failure":
+        header = "⚠️ Watchlist refresh completed — PARTIAL FAILURE"
+    else:
+        header = f"\U0001f4ca Watchlist refresh completed — {'APPLY' if apply_mode else 'DRY RUN'}"
+
+    lines = [
+        header,
+        "",
+        f"Run ID: {result.run_id}",
+        f"Status: {run_status}",
+        f"Evaluated: {result.total_symbols_evaluated}",
+        f"Skipped: {result.total_symbols_skipped}",
+        f"Failed: {result.total_symbols_failed}",
+        "",
+        f"ACTIVE: {result.active_before} → {result.active_after}",
+        f"MONITOR: {result.monitor_before} → {result.monitor_after}",
+        f"Context: {result.context_count}",
+        f"Unavailable: {result.temporarily_ineligible_after}",
+        "",
+        f"{'Promotions' if apply_mode else 'Proposed promotions'}: {len(result.proposed_promotions)}",
+        f"{'Demotions' if apply_mode else 'Proposed demotions'}: {len(result.proposed_demotions)}",
+        f"Provider errors: {result.provider_error_count}",
+        f"Runtime: {result.duration_seconds:.1f}s",
+        "",
+    ]
+    if result.provider_degraded:
+        lines.append("Provider degraded: yes")
+        lines.append("Demotions suppressed to protect the current ACTIVE list.")
+    if apply_mode and result.applied:
+        lines.append("Watchlist states WERE changed (apply mode).")
+        lines.append(
+            f"To undo: python scripts/rollback_evaluation_run.py --run-id {result.run_id} --yes"
+        )
+    else:
+        lines.append("No watchlist states were changed.")
+    return "\n".join(lines)
+
+
+async def cmd_refresh_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
+
+    args = [a.lower() for a in (context.args or [])]
+    mode = args[0] if args else "dry_run"
+    if mode not in ("dry_run", "apply"):
+        await _send(update, "Usage: /refresh_watchlist [dry_run|apply confirm]")
+        return
+
+    apply_mode = mode == "apply"
+    if apply_mode:
+        if not TELEGRAM_ALLOW_WATCHLIST_APPLY:
+            await _send(update, (
+                "Apply mode is disabled for Telegram.\n\n"
+                "Use dry-run first:\n"
+                "`/refresh_watchlist`\n\n"
+                "To enable Telegram apply, set TELEGRAM_ALLOW_WATCHLIST_APPLY=true and restart the bot."
+            ))
+            return
+        if "confirm" not in args:
+            await _send(update, (
+                "Apply mode requires explicit confirmation.\n\n"
+                "Use:\n`/refresh_watchlist apply confirm`"
+            ))
+            return
+
+    guard_ok, guard_reason = can_start_evaluation_run()
+    if not guard_ok:
+        await _send(update, f"⏳ A watchlist refresh is already in progress.\n{guard_reason}")
+        return
+
+    await _send(update, f"\U0001f504 Starting watchlist refresh ({'apply' if apply_mode else 'dry-run'})...")
+
+    try:
+        result = run_watchlist_evaluation(apply=apply_mode, triggered_by="telegram")
+    except Exception as exc:  # never show a raw exception/stack trace to the user
+        print(f"[refresh_watchlist] unexpected error: {type(exc).__name__}")
+        await _send(update, "⚠️ Watchlist refresh failed unexpectedly. Check server logs.")
+        return
+
+    run = get_evaluation_run(result.run_id)
+    run_status = run["status"] if run else ("failed" if result.fatal_error else "success")
+    await _send(update, _format_refresh_summary(result, apply_mode, run_status))
+
+
+async def cmd_watchlist_refresh_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
+
+    run = get_last_evaluation_run()
+    if run is None:
+        await _send(update, "No watchlist evaluation has run yet.")
+        return
+
+    in_progress = get_in_progress_evaluation_run()
+    metadata = run.get("metadata_json") or {}
+    last_scheduled = get_last_successful_scheduled_evaluation()
+
+    lines = [
+        "\U0001f4ca Watchlist Refresh Status",
+        "",
+        f"Run ID: {run['run_id']}",
+        f"Type: {run['run_type']} ({'dry-run' if run['dry_run'] else 'apply'})",
+        f"Status: {run['status']}",
+        f"Started: {run['started_at']} UTC",
+        f"Completed: {run['completed_at'] or 'in progress'} UTC" if run["completed_at"] else "Completed: in progress",
+        f"Duration: {run['duration_seconds']:.1f}s" if run["duration_seconds"] is not None else "Duration: n/a",
+        "",
+        f"Evaluated: {run['total_symbols_evaluated']}  Skipped: {run['total_symbols_skipped']}  "
+        f"Failed: {run['total_symbols_failed']}",
+        f"Provider errors: {run['provider_error_count']}  Stale data: {run['stale_data_count']}  "
+        f"Invalid symbols: {run['invalid_symbol_count']}",
+        "",
+        f"Promotions: {run['promotions_count']}  Demotions: {run['demotions_count']}  "
+        f"Recovered: {run['recovered_count']}  Newly ineligible: {run['newly_ineligible_count']}",
+        f"ACTIVE: {run['active_before']} → {run['active_after']}",
+        f"MONITOR: {run['monitor_before']} → {run['monitor_after']}",
+        "",
+        f"Provider degraded: {'yes' if metadata.get('provider_degraded') else 'no'}",
+        f"Another run in progress: {'yes (run ' + str(in_progress['run_id']) + ')' if in_progress else 'no'}",
+    ]
+    if last_scheduled:
+        lines.append(f"Last successful scheduled run: run {last_scheduled['run_id']} "
+                      f"({last_scheduled['started_at']} UTC)")
+    else:
+        lines.append("Last successful scheduled run: none yet")
+
+    await _send(update, "\n".join(lines))
+
+
+async def cmd_watchlist_changes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
+
+    args = context.args or []
+    limit = WATCHLIST_CHANGES_DEFAULT_LIMIT
+    run = None
+
+    if args and args[0].lower() == "run":
+        if len(args) < 2 or not args[1].isdigit():
+            await _send(update, "Usage: /watchlist_changes run RUN_ID")
+            return
+        run = get_evaluation_run(int(args[1]))
+        if run is None:
+            await _send(update, f"Run {args[1]} not found.")
+            return
+    elif args and args[0].isdigit():
+        limit = min(int(args[0]), WATCHLIST_CHANGES_MAX_LIMIT)
+    elif args:
+        await _send(update, "Usage: /watchlist_changes [N] | /watchlist_changes run RUN_ID")
+        return
+
+    if run is None:
+        recent = list_recent_evaluation_runs(limit=100)
+        run = next((r for r in recent if not r["dry_run"]), None)
+        mode_label = "APPLIED"
+        if run is None:
+            run = next((r for r in recent if r["dry_run"]), None)
+            mode_label = "DRY RUN, proposed only"
+        if run is None:
+            await _send(update, "No evaluation runs found yet.")
+            return
+    else:
+        mode_label = "DRY RUN, proposed only" if run["dry_run"] else "APPLIED"
+
+    metadata = run.get("metadata_json") or {}
+    promotions = metadata.get("proposed_promotions", [])
+    demotions = metadata.get("proposed_demotions", [])
+    recoveries = metadata.get("proposed_recoveries", [])
+    ineligible = metadata.get("proposed_ineligible", [])
+
+    lines = [
+        f"\U0001f4cb Watchlist Changes — Run {run['run_id']} ({mode_label})",
+        "",
+        f"Promotions ({len(promotions)}): {_format_symbol_list(promotions, limit)}",
+        f"Demotions ({len(demotions)}): {_format_symbol_list(demotions, limit)}",
+        f"Recovered ({len(recoveries)}): {_format_symbol_list(recoveries, limit)}",
+        f"Newly ineligible ({len(ineligible)}): {_format_symbol_list(ineligible, limit)}",
+        "",
+        f"Showing up to {limit} symbols per category.",
+    ]
+    if run["dry_run"]:
+        lines.append("This run was a dry-run — nothing was written to the watchlist.")
+    else:
+        lines.append(
+            f"To undo this run: python scripts/rollback_evaluation_run.py --run-id {run['run_id']} --yes"
+        )
+    await _send(update, "\n".join(lines))
+
+
 # ── Bot runner ────────────────────────────────────────────────────────────────
 
 _BOT_COMMANDS = [
@@ -869,5 +1094,8 @@ def run_bot(token: str) -> None:
     app.add_handler(CommandHandler("watchlist_context",    cmd_watchlist_context))
     app.add_handler(CommandHandler("watchlist_ineligible", cmd_watchlist_ineligible))
     app.add_handler(CommandHandler("watchlist_status",     cmd_watchlist_status))
+    app.add_handler(CommandHandler("refresh_watchlist",         cmd_refresh_watchlist))
+    app.add_handler(CommandHandler("watchlist_refresh_status",  cmd_watchlist_refresh_status))
+    app.add_handler(CommandHandler("watchlist_changes",         cmd_watchlist_changes))
 
     app.run_polling()

@@ -883,3 +883,80 @@ compatible. Reverting removes the scheduler module/CLI flags only.
 **Affects production behavior** | No — nothing calls
 `run_scheduled_evaluation()` automatically; `agent/core.py`/`main.py` are
 untouched. Only reachable via direct import or the new CLI flags.
+
+## Entry 23 — Feat: add Telegram watchlist refresh commands (Phase 7)
+
+| Field | Value |
+|---|---|
+| **Commit** | (pending — see `git log` after commit) |
+| **Files changed** | `bot/telegram_bot.py` (+3 commands, +2 helpers), `config.py` (+3 constants), `tests/test_telegram_watchlist_refresh.py` (new), `CLAUDE_CHANGES.md` |
+| **New test count** | 349 total (26 new) — all pass |
+
+Three new authorized Telegram commands wrapping the existing Phase 4-6
+evaluator/scheduler — no new evaluation logic, no scoring changes.
+
+**`/refresh_watchlist [dry_run|apply confirm]`:**
+- Default (no args, or `dry_run`) always runs `run_watchlist_evaluation(apply=False)`.
+- `apply` alone is rejected with a fixed safe message unless
+  `config.TELEGRAM_ALLOW_WATCHLIST_APPLY` is `true` — and even then, the
+  literal word `confirm` must also be present (`apply confirm`) or it's
+  rejected with a separate "requires confirmation" message. Neither
+  config nor wording alone is sufficient — both gates must pass.
+- Uses `services.watchlist_scheduler.can_start_evaluation_run()` (Phase 6)
+  as the concurrency guard — if another run is in progress, replies
+  immediately without starting anything.
+- Any exception is caught, logged to stdout with only the exception type
+  name (never the message, args, or a traceback), and the user sees a
+  fixed generic "failed unexpectedly" message — no raw exception text
+  ever reaches Telegram.
+- One reply message per invocation (a short "starting..." message, then
+  one summary) — never one message per symbol.
+
+**`/watchlist_refresh_status`:** reads the single most recent
+`evaluation_runs` row (any status/type) via the existing
+`get_last_evaluation_run()`, plus `get_in_progress_evaluation_run()` and
+`get_last_successful_scheduled_evaluation()` (both already built in
+Phases 2/6) — no new database queries needed.
+
+**`/watchlist_changes [N] | run RUN_ID`:** reads `proposed_promotions`/
+`proposed_demotions`/`proposed_recoveries`/`proposed_ineligible` from the
+run's `metadata_json` (already written by `run_watchlist_evaluation` for
+*every* run, dry-run or apply — see Phase 4/5) rather than the
+`evaluation_run_changes` audit table from Phase 5.5, because that table is
+**only populated for apply-mode runs** — dry-run runs never get an audit
+row, so `metadata_json` is the one source that works for both. With no
+args, prefers the latest *applied* run; falls back to the latest dry-run
+if no apply run exists yet. Caps each category to
+`WATCHLIST_CHANGES_DEFAULT_LIMIT` (20, overridable per-call via a numeric
+arg up to `WATCHLIST_CHANGES_MAX_LIMIT`=100) with a `"(+N more)"` suffix —
+verified the resulting message stays well under Telegram's 4096-char
+limit even with 500 symbols per category.
+
+**Rollback awareness:** an applied run's summary always includes the
+exact CLI command to undo it
+(`python scripts/rollback_evaluation_run.py --run-id <ID> --yes`). No
+Telegram-side rollback was implemented (out of scope per the spec) and no
+raw SQL or DB path is ever shown — only the run ID and the existing
+Phase 5.5 CLI script's invocation syntax.
+
+**New config constants:** `TELEGRAM_ALLOW_WATCHLIST_APPLY` (false),
+`WATCHLIST_CHANGES_DEFAULT_LIMIT` (20), `WATCHLIST_CHANGES_MAX_LIMIT` (100).
+
+**Authorization:** all three commands call the existing `_check_auth()`
+first and return immediately on failure — verified via dedicated tests
+that an unauthorized call never creates an `evaluation_runs` row and
+never calls `reply_text` at all.
+
+**Revert command:**
+```
+git revert <commit-hash-of-this-entry>
+```
+Note: purely additive (3 new command handlers + 2 new helpers + 3 config
+constants); does not modify any existing handler or evaluator/scheduler
+function, so reverting is safe.
+
+**Affects production behavior** | No — these commands are not registered
+anywhere except this commit's `run_bot()` handler list, and apply mode
+stays disabled by default (`TELEGRAM_ALLOW_WATCHLIST_APPLY=false`). No
+real Telegram bot was started this session; everything was exercised via
+mocked `Update`/`Context` objects against temp databases.
