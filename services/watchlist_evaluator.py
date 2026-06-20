@@ -77,6 +77,7 @@ from analyzers.eligibility import (
     determine_state_change,
     evaluate_symbol_eligibility,
 )
+from analyzers.technical import full_analysis
 from config import (
     ACTIVE_BANK_MAX,
     ACTIVE_MAX_SIZE,
@@ -905,3 +906,154 @@ def rollback_evaluation_run(run_id: int, *, triggered_by: str = "manual") -> dic
         "status": "success", "run_id": run_id, "rollback_run_id": rollback_run_id,
         "restored_symbols": restored_symbols, "conflicts": [],
     }
+
+
+def explain_symbol(symbol: str, *, client: MarketDataClient | None = None) -> dict:
+    """
+    Read-only, on-demand explainability snapshot for one symbol — answers
+    "why is this ACTIVE/MONITOR/INELIGIBLE, and does it currently look
+    interesting?" without writing anything anywhere.
+
+    This is NOT a dry-run or apply evaluation: it never touches the
+    ACTIVE/bank cap bookkeeping for any OTHER symbol, never persists
+    anything, and never changes wl_state. The "would_be_state"/
+    "would_be_reason" fields are the same determine_state_change() output
+    a real evaluation run would compute right now, shown purely as
+    information — nothing is written even if they say "ACTIVE".
+
+    Returns a dict:
+      symbol, found (bool)
+      lifecycle: current DB-persisted state/score/counters/exclusion_reason
+      provider_status, data_ok, failure_reason (if data fetch failed)
+      relevance: {score, components (0.0-1.0 each), weights (%)} — the
+        watchlist relevance score, computed live, NOT persisted
+      opportunity: {score, verdict, vetoed (reason or None), signals
+        (per-indicator bool), rsi, ema150, ema200} — the live alert/
+        "opportunity" score from analyzers.technical.full_analysis()
+      would_be_state, would_be_reason: hypothetical promotion/demotion
+        decision using the symbol's CURRENT persisted counters — informational only
+    """
+    sym = symbol.upper()
+    row = db.get_symbol_status(sym)
+    if row is None:
+        return {"symbol": sym, "found": False}
+
+    client = client or MarketDataClient()
+    sec_type = row["security_type"] or classify_security_type(sym)
+    market_result = client.validate(sym, security_type=sec_type)
+
+    result: dict = {
+        "symbol": sym,
+        "found": True,
+        "lifecycle": {
+            "state": row["wl_state"],
+            "security_type": sec_type,
+            "categories": row["categories"],
+            "enabled": bool(row["enabled"]),
+            "persisted_relevance_score": row["relevance_score"],
+            "consec_promote_count": row["consec_promote_count"],
+            "consec_demote_count": row["consec_demote_count"],
+            "dwell_days": row["dwell_days"],
+            "last_evaluated": row["last_evaluated"],
+            "exclusion_reason": row["exclusion_reason"],
+        },
+        "provider_status": market_result.provider_status.value,
+        "data_ok": market_result.provider_status == ProviderStatus.OK,
+        "failure_reason": None,
+        "relevance": None,
+        "opportunity": None,
+        "would_be_state": None,
+        "would_be_reason": None,
+    }
+
+    if market_result.provider_status != ProviderStatus.OK:
+        result["failure_reason"] = market_result.failure_reason
+        return result
+
+    df, _ = client.get_history(sym)
+    price_data = {"price": market_result.latest_close or 0.0, "volume": market_result.latest_volume or 0}
+    avg_volume = _safe_avg_volume(market_result.average_daily_volume)
+
+    active_symbols = db.get_symbols_by_state("ACTIVE")
+    active_scores: list[int] = []
+    active_bank_count = 0
+    for s in active_symbols:
+        st = db.get_symbol_status(s)
+        if st["relevance_score"] is not None:
+            active_scores.append(st["relevance_score"])
+        if _is_bank(st["categories"]):
+            active_bank_count += 1
+    lowest_active_score = min(active_scores) if active_scores else None
+
+    # Pass the symbol's REAL persisted state, unlike the dry-run evaluator's
+    # candidate-gathering step (which only ever forwards MONITOR/ACTIVE
+    # rows here and forces a MONITOR baseline for never-classified ones).
+    # explain_symbol() must see USER_REMOVED/TEMPORARILY_INELIGIBLE/
+    # ETF_INDEX_CONTEXT exactly as they are, or determine_state_change()'s
+    # own USER_REMOVED-immutability / ETF-permanence checks never fire.
+    eval_out = evaluate_symbol_eligibility(
+        sym, price_data, df, avg_volume,
+        current_state=row["wl_state"],
+        consec_promote=row["consec_promote_count"], consec_demote=row["consec_demote_count"],
+        dwell_days=row["dwell_days"], security_type=sec_type, is_bank=_is_bank(row["categories"]),
+        active_count=len(active_symbols), active_bank_count=active_bank_count,
+        lowest_active_score=lowest_active_score,
+    )
+
+    result["relevance"] = {
+        "score": eval_out["score"],
+        "components": eval_out["components"],
+        "weights_pct": {
+            "data_quality": 25, "liquidity": 25, "trend": 20,
+            "momentum": 15, "proximity": 10, "volatility": 5,
+        },
+    }
+    if row["wl_state"] == "TEMPORARILY_INELIGIBLE":
+        # Mirrors _run()'s real recovery rule: a TEMPORARILY_INELIGIBLE
+        # symbol with valid data again always lands in MONITOR first, never
+        # directly in ACTIVE in the same cycle — determine_state_change()
+        # alone (used for the generic eval_out above) doesn't know this
+        # special case, so it's corrected here for display accuracy only.
+        result["would_be_state"] = "MONITOR"
+        result["would_be_reason"] = "recovered: data valid again; would return to MONITOR first (never directly to ACTIVE)"
+    else:
+        result["would_be_state"] = eval_out["new_state"]
+        result["would_be_reason"] = eval_out["reason"]
+
+    analysis = None
+    if df is not None and price_data["price"] > 0:
+        try:
+            analysis = full_analysis(sym, df, price_data["price"])
+        except Exception:
+            analysis = None
+
+    if analysis is not None:
+        vetoed = None
+        if not analysis["above_ema150"]:
+            vetoed = "price below EMA150"
+        elif analysis["rsi"] < 35:
+            vetoed = f"RSI {analysis['rsi']} < 35 (oversold veto)"
+        elif analysis["rsi"] > 75:
+            vetoed = f"RSI {analysis['rsi']} > 75 (overbought veto)"
+
+        triggered = set(analysis.get("triggered_signals", []))
+        result["opportunity"] = {
+            "score": analysis["score"],
+            "verdict": analysis["verdict"],
+            "vetoed": vetoed,
+            "signals": {
+                "price_above_ema150": "price_above_ema150" in triggered,
+                "ema150_above_ema200": "ema150_above_ema200" in triggered,
+                "macd_bullish_crossover": "macd_bullish_crossover" in triggered,
+                "rsi_healthy_range": "rsi_healthy_range" in triggered,
+                "rsi_acceptable_zone": "rsi_acceptable_zone" in triggered,
+                "volume_spike": "volume_spike" in triggered,
+                "stoch_rsi_bullish_cross": "stoch_rsi_bullish_cross" in triggered,
+                "above_vwap": "above_vwap" in triggered,
+            },
+            "rsi": analysis["rsi"],
+            "ema150": analysis["ema150"],
+            "ema200": analysis["ema200"],
+        }
+
+    return result

@@ -40,7 +40,7 @@ from db.database import (
     set_language,
     update_symbol_state,
 )
-from services.watchlist_evaluator import run_watchlist_evaluation
+from services.watchlist_evaluator import explain_symbol, run_watchlist_evaluation
 from services.watchlist_scheduler import can_start_evaluation_run, get_last_successful_scheduled_evaluation
 
 # ── Authorization ────────────────────────────────────────────────────────────
@@ -881,6 +881,82 @@ async def cmd_watchlist_ineligible(update: Update, context: ContextTypes.DEFAULT
     await _send(update, "\n".join(lines))
 
 
+_OPPORTUNITY_SIGNAL_LABELS: dict[str, str] = {
+    "price_above_ema150":      "EMA150 trend",
+    "ema150_above_ema200":     "EMA150>EMA200",
+    "macd_bullish_crossover":  "MACD bull cross",
+    "rsi_healthy_range":       "RSI healthy zone",
+    "rsi_acceptable_zone":     "RSI acceptable zone",
+    "volume_spike":            "Volume spike",
+    "stoch_rsi_bullish_cross": "Stoch RSI cross",
+    "above_vwap":              "Above VWAP",
+}
+
+
+def _format_watchlist_status(symbol: str, status: dict, explanation: dict | None) -> str:
+    """
+    Builds the full explainability view for one symbol: persisted
+    lifecycle state, a live (never-persisted) relevance-score breakdown,
+    a live opportunity-score breakdown with veto reasons, and a fixed
+    disclaimer. `explanation` is the dict returned by
+    services.watchlist_evaluator.explain_symbol() (or None if that call
+    itself failed unexpectedly — the lifecycle section is still shown).
+    """
+    cats = ", ".join(status.get("categories", [])) or "N/A"
+    lines = [
+        f"\U0001f4ca Watchlist Status: {symbol}",
+        "",
+        "Lifecycle (persisted):",
+        f"  State: {status.get('wl_state', 'N/A')}  Type: {status.get('security_type', 'N/A')}",
+        f"  Categories: {cats}  Enabled: {status.get('enabled', 'N/A')}",
+        f"  Persisted score: {status.get('relevance_score', 'N/A')} (only set by apply mode, not dry-run)",
+        f"  Promote streak: {status.get('consec_promote_count', 0)}  "
+        f"Demote streak: {status.get('consec_demote_count', 0)}  Dwell: {status.get('dwell_days', 0)}d",
+        f"  Last evaluated: {status.get('last_evaluated') or 'never'}",
+        f"  Exclusion reason: {status.get('exclusion_reason') or 'none'}",
+    ]
+
+    if explanation is None:
+        lines += ["", "Live breakdown unavailable (internal error fetching live data)."]
+    elif not explanation.get("data_ok"):
+        lines += ["", f"Live data fetch failed: {explanation.get('failure_reason') or 'unknown reason'}",
+                  "Relevance/opportunity breakdown unavailable this check."]
+    else:
+        rel = explanation["relevance"]
+        comp = rel["components"]
+        w = rel["weights_pct"]
+        lines += [
+            "",
+            f"Relevance score (live, NOT persisted): {rel['score']}/100",
+            f"  Data quality ({w['data_quality']}%): {comp['data_quality']:.2f}   "
+            f"Liquidity ({w['liquidity']}%): {comp['liquidity']:.2f}",
+            f"  Trend ({w['trend']}%): {comp['trend']:.2f}   Momentum ({w['momentum']}%): {comp['momentum']:.2f}",
+            f"  Proximity ({w['proximity']}%): {comp['proximity']:.2f}   Volatility ({w['volatility']}%): {comp['volatility']:.2f}",
+            f"  Would be: {explanation['would_be_state']} — {explanation['would_be_reason']}",
+        ]
+
+        opp = explanation.get("opportunity")
+        if opp is None:
+            lines += ["", "Live opportunity score unavailable (indicator calculation failed)."]
+        else:
+            fired = [_OPPORTUNITY_SIGNAL_LABELS[k] for k, v in opp["signals"].items() if v and k in _OPPORTUNITY_SIGNAL_LABELS]
+            ema200_str = f"{opp['ema200']:,.2f}" if opp["ema200"] is not None else "N/A (needs 200+ days history)"
+            lines += [
+                "",
+                f"Live opportunity score: {opp['score']}/100 — {opp['verdict']}",
+                f"  RSI: {opp['rsi']}   EMA150: {opp['ema150']:,.2f}   EMA200: {ema200_str}",
+                f"  Signals fired: {', '.join(fired) if fired else 'none'}",
+                f"  Veto: {opp['vetoed'] or 'none'}",
+            ]
+
+    lines += [
+        "",
+        "⚠️ Screening/alert score only — not a verified BUY recommendation.",
+        "No fundamentals, news, earnings calendar, or backtest are used.",
+    ]
+    return "\n".join(lines)
+
+
 async def cmd_watchlist_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_auth(update):
         return
@@ -894,21 +970,14 @@ async def cmd_watchlist_status(update: Update, context: ContextTypes.DEFAULT_TYP
     if not status:
         await _send(update, f"{s['wl_not_found']}: {symbol}")
         return
-    cats = ', '.join(status.get('categories', [])) or 'N/A'
-    lines = [
-        f"{s['wl_status_title']}: {symbol}",
-        f"State: {status.get('wl_state', 'N/A')}",
-        f"Type: {status.get('security_type', 'N/A')}",
-        f"Score: {status.get('relevance_score', 'N/A')}",
-        f"Categories: {cats}",
-        f"Enabled: {status.get('enabled', 'N/A')}",
-        f"Promote streak: {status.get('consec_promote_count', 0)}",
-        f"Demote streak: {status.get('consec_demote_count', 0)}",
-        f"Dwell days: {status.get('dwell_days', 0)}",
-        f"Last evaluated: {status.get('last_evaluated') or 'never'}",
-        f"Exclusion reason: {status.get('exclusion_reason') or 'none'}",
-    ]
-    await _send(update, "\n".join(lines))
+
+    try:
+        explanation = explain_symbol(symbol)
+    except Exception as exc:
+        print(f"[watchlist_status] explain_symbol failed for {symbol}: {type(exc).__name__}")
+        explanation = None
+
+    await _send(update, _format_watchlist_status(symbol, status, explanation))
 
 
 # ── Watchlist evaluation refresh (Phase 7) ────────────────────────────────────
