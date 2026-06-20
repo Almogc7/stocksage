@@ -588,3 +588,92 @@ used by other code, so reverting is safe.
 automatically yet; it is only reachable via the new manual CLI script or
 direct import. Phase 5 will be the first phase that can change a real
 watchlist row.
+
+## Entry 20 — Feat: apply watchlist evaluation state changes (Phase 5)
+
+| Field | Value |
+|---|---|
+| **Commit** | (pending — see `git log` after commit) |
+| **Files changed** | `services/watchlist_evaluator.py`, `db/database.py` (+`apply_evaluation_changes`), `scripts/dry_run_evaluation.py`, `tests/test_watchlist_evaluator_apply.py` (new), `CLAUDE_CHANGES.md` |
+| **New test count** | 265 total (25 new) — all pass |
+
+Adds real, transactional application of the Phase 4 evaluator's proposed
+changes. The dry-run computation is unchanged — `run_dry_run_evaluation()`
+is now a thin alias for the new `run_watchlist_evaluation(apply=False)`.
+`run_watchlist_evaluation(apply=True)` runs the identical computation and
+then writes the result to the `watchlist` table in **one atomic
+transaction**.
+
+**Database write — `db.apply_evaluation_changes(updates: list[dict])`:**
+opens a single connection/transaction for the whole batch; every column
+key is validated against an explicit allowlist *before* any write begins,
+and any exception during the loop rolls back everything written so far in
+that call (sqlite3's `with conn:` semantics) — no partial promotion/
+demotion state can survive a failed apply.
+
+**Per-symbol persistence — `_build_db_fields()` in `services/watchlist_evaluator.py`:**
+mirrors the threshold semantics `analyzers.eligibility.determine_state_change()`
+deliberately leaves to its caller ("does NOT update the DB — callers are
+responsible for persistence"):
+- No transition this pass: increments/resets `consec_promote_count` or
+  `consec_demote_count` based on whether the score crossed
+  `PROMOTION_THRESHOLD`/`DEMOTION_THRESHOLD`; increments `dwell_days` for
+  retained ACTIVE symbols.
+- A real transition: resets all three counters/dwell_days to 0 and stamps
+  `last_promoted`/`last_demoted` as appropriate.
+- → TEMPORARILY_INELIGIBLE: writes `exclusion_reason` and `reeval_date`
+  (reusing `MarketDataResult.retry_after_utc` from Phase 3 when available,
+  falling back to `MARKET_DATA_DATA_QUALITY_RETRY_HOURS` otherwise).
+- TEMPORARILY_INELIGIBLE → MONITOR (recovery): clears `exclusion_reason`/
+  `reeval_date`, never promotes directly to ACTIVE.
+- Always sets `wl_classified = 1` (the symbol has now had a real apply
+  pass; Phase 1's startup classifier must never touch it again).
+- A symbol with a `provider_transient` failure this run gets **no write
+  at all** — `db_fields` stays `None` — its last-known-good score/state is
+  left completely untouched.
+- USER_REMOVED and ETF_INDEX_CONTEXT rows are never gathered as candidates
+  in the first place (same universe-selection logic as Phase 4), so they
+  are structurally never written by apply mode either.
+
+**Provider outage in apply mode:** identical suppression logic to Phase 4 —
+score-driven ACTIVE→MONITOR demotions are reverted to "stay ACTIVE" when
+the run is provider-degraded, and that reversion is what actually gets
+written (i.e. nothing changes for those symbols). The evaluation_runs row
+is still finalized `partial_failure`.
+
+**CLI (`scripts/dry_run_evaluation.py`):** default remains dry-run.
+Applying requires **both** `--apply` and `--yes` — `--apply` alone prints a
+warning and falls back to dry-run. Prints `MODE: APPLY (REAL CHANGES WRITTEN)`
+vs `MODE: DRY-RUN (NO CHANGES WRITTEN)` prominently. Still never imports
+the bot.
+
+**Manual validation (real yfinance, copied DB only — not the production DB):**
+ran apply twice against a timestamped copy of `db/stocksage.db`.
+- **Apply #1:** 62/62 symbols evaluated, 0 promotions (`consec_promote_count`
+  0→1 for all qualifying symbols) — expected hysteresis warm-up, see
+  `WATCHLIST_LIVE_DRY_RUN_REPORT.md`.
+- **Apply #2:** 30 promotions (`VRT, MRVL, AAPL, AMD, ANET, APLD, AVGO, BA,
+  CCJ, CEG, CRWD, CSCO, DDOG, DOCN, ETN, FTNT, GLW, GOOGL, JPM, NEE, NET,
+  NVDA, QCOM, SNOW, TSLA, VST, ENPH, OKLO, RKLB, SMR`) — exactly the top 30
+  scorers from the Phase 4.5 live report. ACTIVE: 0→30 (at the cap, not
+  exceeded), bank-ACTIVE: 1 (JPM, well under the cap of 8), 0 duplicate
+  tickers, `last_promoted` correctly stamped, counters reset to 0.
+- Confirmed the **real** `db/stocksage.db` mtime and every table's row
+  count were identical before and after both runs; the copy was deleted
+  afterward and was never committed (`db/*.db` is gitignored).
+
+**Revert command:**
+```
+git revert <commit-hash-of-this-entry>
+```
+Note: adds a new DB function and extends the evaluator; does not modify
+any existing column or remove anything, so reverting is safe. A DB that
+already had apply mode run against it keeps its applied state — reverting
+only removes the *capability* to apply again, it does not undo prior
+writes (use the standard watchlist `/remove`+`/add` or direct SQL if a
+specific applied change needs manual correction).
+
+**Affects production behavior** | Not yet — nothing calls
+`run_watchlist_evaluation(apply=True)` automatically. It is only reachable
+via direct import or the CLI script with explicit `--apply --yes`, and was
+not run against the real production DB this session.

@@ -358,6 +358,46 @@ def get_symbols_by_state(state: str) -> list[str]:
     return [row["symbol"] for row in rows]
 
 
+_APPLY_EVALUATION_ALLOWED_COLUMNS: frozenset[str] = frozenset({
+    "wl_state", "relevance_score", "security_type", "exclusion_reason",
+    "reeval_date", "last_evaluated", "last_promoted", "last_demoted",
+    "consec_promote_count", "consec_demote_count", "dwell_days", "wl_classified",
+})
+
+
+def apply_evaluation_changes(updates: list[dict]) -> None:
+    """
+    Atomically write a batch of watchlist column updates computed by
+    services/watchlist_evaluator.py's apply mode (Phase 5).
+
+    Every update dict must contain "symbol" plus any subset of the allowed
+    columns above. All updates are written using ONE connection/transaction:
+    if any single UPDATE raises, sqlite3's context-manager rollback discards
+    every change made so far in this call — no partial apply can persist.
+
+    Callers are responsible for never including USER_REMOVED symbols or any
+    column not in this allowlist (unknown keys raise immediately, before
+    any write happens, so a bad batch never gets partially applied either).
+    """
+    if not updates:
+        return
+
+    for upd in updates:
+        for key in upd:
+            if key != "symbol" and key not in _APPLY_EVALUATION_ALLOWED_COLUMNS:
+                raise ValueError(f"Unknown watchlist column in apply update: {key!r}")
+
+    with _connect() as conn:
+        for upd in updates:
+            symbol = upd["symbol"].upper()
+            fields = {k: v for k, v in upd.items() if k != "symbol"}
+            if not fields:
+                continue
+            set_clause = ", ".join(f"{k} = ?" for k in fields)
+            params = list(fields.values()) + [symbol]
+            conn.execute(f"UPDATE watchlist SET {set_clause} WHERE symbol = ?", params)
+
+
 def get_unclassified_symbols() -> list[str]:
     """Return enabled=1 symbols that have never been through
     run_initial_classification() yet (wl_classified=0). Read-only helper for

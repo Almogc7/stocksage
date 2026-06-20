@@ -1,9 +1,9 @@
 """
-Dry-run watchlist eligibility evaluator (Phase 4 of the dynamic watchlist
-lifecycle — see WATCHLIST_AND_ALERTS_DESIGN.md).
+Watchlist eligibility evaluator — dry-run (Phase 4) and apply (Phase 5) of
+the dynamic watchlist lifecycle (see WATCHLIST_AND_ALERTS_DESIGN.md).
 
 What this module DOES:
-  - Reads the current watchlist universe from SQLite (read-only).
+  - Reads the current watchlist universe from SQLite.
   - Selects which symbols are eligible for evaluation this run, recording a
     skip_reason for every symbol that isn't.
   - Fetches/validates market data via data.market_data_validator.MarketDataClient.
@@ -12,13 +12,37 @@ What this module DOES:
     cap (30), bank cap (8), and replacement margin (5).
   - Detects a broad yfinance outage and suppresses mass demotion proposals
     when one is detected.
-  - Records an evaluation_runs row (Phase 2) with dry_run=True.
+  - Records an evaluation_runs row (Phase 2) every run.
+  - In **apply mode** (`apply=True`), writes the computed changes to the
+    watchlist table in one atomic transaction (db.apply_evaluation_changes).
+    In **dry-run mode** (the default), it never does.
+
+Dry-run vs apply (Phase 5):
+  `run_watchlist_evaluation(apply=False)` (alias: `run_dry_run_evaluation()`)
+  computes and reports proposed changes only — identical to Phase 4,
+  unchanged. `run_watchlist_evaluation(apply=True)` runs the exact same
+  computation and then persists it: relevance_score, last_evaluated,
+  hysteresis counters, wl_state transitions, last_promoted/last_demoted,
+  exclusion_reason, and reeval_date. USER_REMOVED and ETF_INDEX_CONTEXT
+  rows are never touched in either mode — they are never gathered as
+  candidates in the first place (see universe selection below).
+
+Why a symbol's first real apply run usually promotes nobody:
+  PROMOTION_CONSEC_REQUIRED = 2, and a database that has never had a live
+  eligibility pass starts every symbol at consec_promote_count = 0. The
+  first apply run can only bring qualifying MONITOR symbols to
+  consec_promote_count = 1 — actual promotion to ACTIVE requires a SECOND
+  consecutive qualifying evaluation (i.e. a second apply run after this
+  one, on a later evaluation cycle). This is expected hysteresis warm-up
+  behavior, not a bug — see WATCHLIST_LIVE_DRY_RUN_REPORT.md (Phase 4.5)
+  for the live validation that first surfaced this.
 
 What this module does NOT do:
-  - Write any proposed state/score/counter change to the watchlist table.
-    Every change is "proposed" only — see DryRunEvaluationResult.
   - Schedule anything, or send Telegram messages.
   - Modify analyzers/eligibility.py's existing scoring/hysteresis contract.
+  - Add new schema columns. `data_timestamp_utc`/`provider_status` per
+    symbol are not persisted (no such columns exist yet) — `last_evaluated`
+    and `exclusion_reason` serve the equivalent bookkeeping role.
 
 Recovery semantics (TEMPORARILY_INELIGIBLE -> MONITOR):
   analyzers.eligibility.determine_state_change() has no recovery branch —
@@ -44,7 +68,7 @@ Provider-outage suppression (documented scope):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import db.database as db
 from analyzers.eligibility import (
@@ -56,6 +80,9 @@ from config import (
     ACTIVE_BANK_MAX,
     ACTIVE_MAX_SIZE,
     BANK_CATEGORIES,
+    DEMOTION_THRESHOLD,
+    MARKET_DATA_DATA_QUALITY_RETRY_HOURS,
+    PROMOTION_THRESHOLD,
     WATCHLIST_PROVIDER_OUTAGE_THRESHOLD_PCT,
 )
 from data.market_data_validator import MarketDataClient, ProviderStatus
@@ -100,11 +127,18 @@ class SymbolEvalResult:
     skip_reason: str | None = None
     failure_reason: str | None = None
 
+    # Apply-mode bookkeeping only — the real watchlist column values this
+    # symbol would get written in apply mode. None means "do not write
+    # anything for this symbol" (skipped, or a transient provider failure
+    # we must leave untouched). Not part of the dry-run reporting contract.
+    db_fields: dict | None = field(default=None, repr=False, compare=False)
+
 
 @dataclass
 class DryRunEvaluationResult:
     run_id: int | None
     dry_run: bool = True
+    applied: bool = False
     started_at: str = ""
     completed_at: str = ""
     duration_seconds: float = 0.0
@@ -200,15 +234,110 @@ def _price_data_from_result(market_result) -> dict:
     }
 
 
+def _build_db_fields(
+    row: dict, market_result, score: int, current_state: str,
+    proposed_state: str, reason: str, now_str: str,
+) -> dict:
+    """
+    Compute the real watchlist column values to persist for one evaluated
+    symbol in apply mode, given its final proposed_state.
+
+    determine_state_change() is a pure function that deliberately never
+    writes to the DB ("callers are responsible for persistence" — see its
+    docstring in analyzers/eligibility.py). This is that persistence layer:
+    it mirrors the same promotion/demotion threshold semantics to decide
+    hysteresis counter increments when no transition happens yet, and
+    resets/stamps timestamps when one does.
+
+    Always marks wl_classified=1 — once a symbol has been through a real
+    apply pass, the startup classifier (Phase 1) must never touch it again.
+    """
+    fields: dict = {
+        "symbol": row["symbol"],
+        "relevance_score": score,
+        "security_type": row["security_type"],
+        "last_evaluated": now_str,
+        "wl_classified": 1,
+    }
+
+    if proposed_state == current_state:
+        if current_state == "MONITOR":
+            if score >= PROMOTION_THRESHOLD:
+                fields["consec_promote_count"] = row["consec_promote_count"] + 1
+                fields["consec_demote_count"] = 0
+            else:
+                fields["consec_promote_count"] = 0
+        elif current_state == "ACTIVE":
+            if score < DEMOTION_THRESHOLD:
+                fields["consec_demote_count"] = row["consec_demote_count"] + 1
+                fields["consec_promote_count"] = 0
+            else:
+                fields["consec_demote_count"] = 0
+            fields["dwell_days"] = row["dwell_days"] + 1
+        fields["exclusion_reason"] = ""
+        return fields
+
+    # A real transition: reset the streak counters and dwell time, and
+    # stamp the appropriate timestamp.
+    fields["wl_state"] = proposed_state
+    fields["consec_promote_count"] = 0
+    fields["consec_demote_count"] = 0
+    fields["dwell_days"] = 0
+
+    if proposed_state == "ACTIVE":
+        fields["last_promoted"] = now_str
+        fields["exclusion_reason"] = ""
+        fields["reeval_date"] = None
+    elif proposed_state == "MONITOR":
+        if current_state == "ACTIVE":
+            fields["last_demoted"] = now_str
+        fields["exclusion_reason"] = ""
+        fields["reeval_date"] = None
+    elif proposed_state == "TEMPORARILY_INELIGIBLE":
+        fields["exclusion_reason"] = reason
+        retry_date = None
+        if market_result is not None and market_result.retry_after_utc:
+            retry_date = market_result.retry_after_utc.split(" ")[0]
+        if retry_date is None:
+            retry_date = (
+                datetime.now(timezone.utc) + timedelta(hours=MARKET_DATA_DATA_QUALITY_RETRY_HOURS)
+            ).date().isoformat()
+        fields["reeval_date"] = retry_date
+
+    return fields
+
+
 def run_dry_run_evaluation(
     *,
     client: MarketDataClient | None = None,
     triggered_by: str = "manual",
     now: datetime | None = None,
 ) -> DryRunEvaluationResult:
+    """Backwards-compatible alias for run_watchlist_evaluation(apply=False)."""
+    return run_watchlist_evaluation(apply=False, client=client, triggered_by=triggered_by, now=now)
+
+
+def run_watchlist_evaluation(
+    *,
+    apply: bool = False,
+    client: MarketDataClient | None = None,
+    triggered_by: str = "manual",
+    now: datetime | None = None,
+) -> DryRunEvaluationResult:
     """
-    Run one full dry-run eligibility evaluation pass. Never writes to the
-    watchlist table. Always records an evaluation_runs row (dry_run=True).
+    Run one full eligibility evaluation pass.
+
+    apply=False (default, dry-run): computes and reports proposed changes
+    only — never writes to the watchlist table.
+
+    apply=True: runs the identical computation, then writes every
+    evaluated symbol's resulting state/score/counters to the watchlist
+    table in ONE atomic transaction (db.apply_evaluation_changes). If that
+    write fails, the transaction rolls back entirely (handled inside
+    apply_evaluation_changes) and this function marks the evaluation_runs
+    row 'failed' — no partial state survives a failed apply.
+
+    Always records an evaluation_runs row (dry_run=not apply).
     """
     client = client or MarketDataClient()
     now = now or datetime.now(timezone.utc)
@@ -216,8 +345,9 @@ def run_dry_run_evaluation(
     today_str = now.date().isoformat()
 
     summary_before = db.get_watchlist_summary()
+    run_type = "manual" if apply else "dry_run"
     run_id = db.create_evaluation_run(
-        "dry_run", dry_run=True, triggered_by=triggered_by,
+        run_type, dry_run=not apply, triggered_by=triggered_by,
         active_before=summary_before.get("ACTIVE", 0),
         monitor_before=summary_before.get("MONITOR", 0),
         context_count=summary_before.get("ETF_INDEX_CONTEXT", 0),
@@ -227,6 +357,7 @@ def run_dry_run_evaluation(
 
     result = DryRunEvaluationResult(
         run_id=run_id,
+        dry_run=not apply,
         started_at=started_at,
         active_before=summary_before.get("ACTIVE", 0),
         monitor_before=summary_before.get("MONITOR", 0),
@@ -236,8 +367,15 @@ def run_dry_run_evaluation(
     )
 
     try:
-        _run(result, client, today_str)
-    except Exception as exc:  # fatal evaluator error — never leave a half-applied run
+        _run(result, client, today_str, now)
+        if apply:
+            updates = [
+                sr.db_fields for sr in result.symbol_results
+                if sr.db_fields is not None
+            ]
+            db.apply_evaluation_changes(updates)
+            result.applied = True
+    except Exception as exc:  # fatal error — never leave a half-applied run
         result.fatal_error = f"{type(exc).__name__}: {exc}"
         completed = datetime.now(timezone.utc)
         result.completed_at = completed.strftime("%Y-%m-%d %H:%M:%S")
@@ -269,6 +407,7 @@ def run_dry_run_evaluation(
         yfinance_request_count=result.yfinance_request_count,
     )
     metadata = {
+        "applied": result.applied,
         "proposed_promotions": result.proposed_promotions,
         "proposed_demotions": result.proposed_demotions,
         "proposed_ineligible": result.proposed_ineligible,
@@ -287,7 +426,10 @@ def run_dry_run_evaluation(
     return result
 
 
-def _run(result: DryRunEvaluationResult, client: MarketDataClient, today_str: str) -> None:
+def _run(
+    result: DryRunEvaluationResult, client: MarketDataClient, today_str: str, now: datetime
+) -> None:
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     active_symbols = db.get_symbols_by_state("ACTIVE")
     monitor_symbols = db.get_symbols_by_state("MONITOR")
     unclassified_symbols = db.get_unclassified_symbols()
@@ -380,7 +522,7 @@ def _run(result: DryRunEvaluationResult, client: MarketDataClient, today_str: st
         sym = row["symbol"]
         sr = _build_base_result(sym, row, market_results[sym])
         if market_results[sym].provider_status != ProviderStatus.OK:
-            _apply_failure_outcome(sr, row, market_results[sym], result)
+            _apply_failure_outcome(sr, row, market_results[sym], result, now_str)
             results_by_symbol[sym] = sr
             if sr.proposed_state == "ACTIVE":
                 # Transient provider failure: symbol stays ACTIVE this run.
@@ -411,6 +553,9 @@ def _run(result: DryRunEvaluationResult, client: MarketDataClient, today_str: st
 
         sr.proposed_state = new_state
         sr.reason = reason
+        sr.db_fields = _build_db_fields(
+            row, market_results[sym], sr.relevance_score, "ACTIVE", new_state, reason, now_str
+        )
         if new_state == "ACTIVE":
             tracker.add(sym, sr.relevance_score, _is_bank(row["categories"]))
         elif new_state == "MONITOR":
@@ -429,7 +574,7 @@ def _run(result: DryRunEvaluationResult, client: MarketDataClient, today_str: st
         sr = _build_base_result(sym, row, mr)
 
         if mr.provider_status != ProviderStatus.OK:
-            _apply_failure_outcome(sr, row, mr, result)
+            _apply_failure_outcome(sr, row, mr, result, now_str)
             results_by_symbol[sym] = sr
             continue
 
@@ -448,15 +593,21 @@ def _run(result: DryRunEvaluationResult, client: MarketDataClient, today_str: st
 
         if eval_out["new_state"] == "ACTIVE":
             pending_promotion.append((sr.relevance_score, sym))
-            sr.proposed_state = "MONITOR"  # provisional; resolved in pass 2 below
+            sr.proposed_state = "MONITOR"  # provisional; resolved (incl. db_fields) in pass 2 below
             sr.reason = "pending promotion-cap resolution"
         elif eval_out["new_state"] == "TEMPORARILY_INELIGIBLE":
             sr.proposed_state = "TEMPORARILY_INELIGIBLE"
             sr.reason = eval_out["reason"]
+            sr.db_fields = _build_db_fields(
+                row, mr, sr.relevance_score, "MONITOR", "TEMPORARILY_INELIGIBLE", sr.reason, now_str
+            )
             result.proposed_ineligible.append(sym)
         else:
             sr.proposed_state = "MONITOR"
             sr.reason = eval_out["reason"]
+            sr.db_fields = _build_db_fields(
+                row, mr, sr.relevance_score, "MONITOR", "MONITOR", sr.reason, now_str
+            )
         results_by_symbol[sym] = sr
 
     # TEMPORARILY_INELIGIBLE candidates whose retry time has arrived. A
@@ -471,7 +622,7 @@ def _run(result: DryRunEvaluationResult, client: MarketDataClient, today_str: st
         sr = _build_base_result(sym, row, mr)
 
         if mr.provider_status != ProviderStatus.OK:
-            _apply_failure_outcome(sr, row, mr, result)
+            _apply_failure_outcome(sr, row, mr, result, now_str)
             results_by_symbol[sym] = sr
             continue
 
@@ -487,6 +638,9 @@ def _run(result: DryRunEvaluationResult, client: MarketDataClient, today_str: st
         sr.hard_eligibility_passed = True
         sr.proposed_state = "MONITOR"
         sr.reason = "recovered: data valid again; returning to MONITOR for normal promotion cycle"
+        sr.db_fields = _build_db_fields(
+            row, mr, sr.relevance_score, "TEMPORARILY_INELIGIBLE", "MONITOR", sr.reason, now_str
+        )
         result.proposed_recoveries.append(sym)
         results_by_symbol[sym] = sr
 
@@ -519,15 +673,26 @@ def _run(result: DryRunEvaluationResult, client: MarketDataClient, today_str: st
                 if evicted_result is not None:
                     evicted_result.proposed_state = "MONITOR"
                     evicted_result.reason = f"replaced by higher-scoring candidate {sym} (score {score})"
+                    evicted_row = rows_by_symbol[evicted_symbol]
+                    evicted_result.db_fields = _build_db_fields(
+                        evicted_row, market_results[evicted_symbol], evicted_result.relevance_score,
+                        "ACTIVE", "MONITOR", evicted_result.reason, now_str,
+                    )
                     if evicted_symbol not in result.proposed_demotions:
                         result.proposed_demotions.append(evicted_symbol)
             tracker.add(sym, score, _is_bank(row["categories"]))
             sr.proposed_state = "ACTIVE"
             sr.reason = reason
+            sr.db_fields = _build_db_fields(
+                row, market_results[sym], score, "MONITOR", "ACTIVE", reason, now_str
+            )
             result.proposed_promotions.append(sym)
         else:
             sr.proposed_state = new_state
             sr.reason = reason
+            sr.db_fields = _build_db_fields(
+                row, market_results[sym], score, "MONITOR", new_state, reason, now_str
+            )
 
     result.symbol_results.extend(results_by_symbol.values())
     result.active_after = tracker.count
@@ -567,7 +732,7 @@ def _build_base_result(symbol: str, row: dict, market_result) -> SymbolEvalResul
 
 
 def _apply_failure_outcome(
-    sr: SymbolEvalResult, row: dict, market_result, result: DryRunEvaluationResult
+    sr: SymbolEvalResult, row: dict, market_result, result: DryRunEvaluationResult, now_str: str
 ) -> None:
     result.total_symbols_failed += 1
     sr.relevance_score = 0
@@ -583,10 +748,19 @@ def _apply_failure_outcome(
     if market_result.failure_type == "provider_transient":
         sr.proposed_state = current_state
         sr.reason = f"provider transient failure ({market_result.provider_status.value}); no change proposed this run"
+        # db_fields stays None: a transient provider blip must never be
+        # written — not even a refreshed last_evaluated/score — so the
+        # symbol's real last-known-good data is left completely untouched.
     elif current_state == "TEMPORARILY_INELIGIBLE":
         sr.proposed_state = "TEMPORARILY_INELIGIBLE"
         sr.reason = f"still ineligible: {market_result.failure_reason}"
+        sr.db_fields = _build_db_fields(
+            row, market_result, 0, "TEMPORARILY_INELIGIBLE", "TEMPORARILY_INELIGIBLE", sr.reason, now_str
+        )
     else:
         sr.proposed_state = "TEMPORARILY_INELIGIBLE"
         sr.reason = f"data-quality failure: {market_result.failure_reason}"
+        sr.db_fields = _build_db_fields(
+            row, market_result, 0, current_state, "TEMPORARILY_INELIGIBLE", sr.reason, now_str
+        )
         result.proposed_ineligible.append(sr.symbol)

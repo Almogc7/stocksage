@@ -1,28 +1,36 @@
 """
-Manual entrypoint for the Phase 4 dry-run watchlist evaluator.
+Manual entrypoint for the watchlist evaluator (Phase 4 dry-run / Phase 5 apply).
 
 Run from the stocksage/ directory:
 
-    python scripts/dry_run_evaluation.py
+    python scripts/dry_run_evaluation.py --db db/stocksage.db
+    python scripts/dry_run_evaluation.py --db db/stocksage.db --apply --yes
 
 What it does:
-  - Reads the watchlist universe from db/stocksage.db (read-only — the
-    evaluator never writes to the watchlist table).
-  - Fetches live data via a real MarketDataClient (real yfinance calls).
-  - Records ONE evaluation_runs row with dry_run=True (this is the only
-    database write this script performs — by design, see Phase 2/4).
-  - Prints a plain-text summary of proposed changes. Does not apply them.
-  - Never sends a Telegram message — this script does not import the bot.
+  - Reads the watchlist universe from the target DB.
+  - Fetches live data via a real MarketDataClient (real yfinance calls),
+    unless --mock is passed.
+  - Records ONE evaluation_runs row every run (dry_run=True unless --apply).
+  - In apply mode, additionally writes the computed state/score/counter
+    changes to the watchlist table in one atomic transaction — see
+    services/watchlist_evaluator.py's apply-mode docstring.
+  - Prints a plain-text summary. Never sends a Telegram message — this
+    script does not import the bot.
 
 Safety:
-  - Default mode is dry-run; there is no flag to make this script write to
-    the watchlist table — that capability does not exist yet (Phase 5+).
+  - Default mode is DRY-RUN. Applying real changes requires the explicit
+    --apply flag.
+  - --apply additionally requires --yes (a deliberate second flag) so a
+    single typo/flag-order mistake cannot silently write to the watchlist.
   - Pass --db <path> to point at a temporary/test SQLite file instead of
-    the real production database (useful for local experimentation without
-    even writing the evaluation_runs bookkeeping row to the real DB).
-  - Use --mock to skip all network calls entirely (writes a fake successful
-    evaluation_runs row using synthetic data) — useful for testing this
-    script itself without touching yfinance or needing real market hours.
+    the real production database. Strongly recommended, especially for
+    --apply, until you've validated the result on a copy first.
+  - Use --mock to skip all network calls entirely (every candidate reports
+    TEMPORARY_FAILURE) — useful for exercising this script itself without
+    touching yfinance or needing real market hours.
+  - This script will NOT run --apply against the real production DB_PATH
+    without you passing both --apply and --yes explicitly; there is no
+    "auto-confirm" default.
 """
 import argparse
 import sys
@@ -31,11 +39,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-def _print_summary(result) -> None:
+def _print_summary(result, apply_mode: bool) -> None:
+    mode_label = "APPLY (REAL CHANGES WRITTEN)" if apply_mode else "DRY-RUN (NO CHANGES WRITTEN)"
     print("=" * 60)
-    print("WATCHLIST DRY-RUN EVALUATION SUMMARY")
+    print(f"WATCHLIST EVALUATION SUMMARY — MODE: {mode_label}")
     print("=" * 60)
     print(f"run_id:              {result.run_id}")
+    print(f"dry_run:             {result.dry_run}")
+    print(f"applied:             {result.applied}")
     print(f"started_at (UTC):    {result.started_at}")
     print(f"completed_at (UTC):  {result.completed_at}")
     print(f"duration_seconds:    {result.duration_seconds:.2f}")
@@ -66,15 +77,30 @@ def _print_summary(result) -> None:
         for w in result.warnings:
             print(f"  - {w}")
     print("=" * 60)
-    print("No watchlist state was changed. This was a dry run.")
+    if apply_mode and result.applied:
+        print("Watchlist state WAS changed (apply mode).")
+    elif apply_mode and not result.applied:
+        print("Apply mode requested but the run failed before writing — no watchlist state was changed.")
+    else:
+        print("No watchlist state was changed. This was a dry run.")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--db", default=None,
-        help="Path to a SQLite file to read instead of the real production db/stocksage.db. "
-             "Strongly recommended for local experimentation.",
+        help="Path to a SQLite file to read/write instead of the real production db/stocksage.db. "
+             "Strongly recommended for local experimentation, and required in practice for --apply "
+             "until you have validated the result on a copy.",
+    )
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="Write the computed changes to the watchlist table. Default is dry-run (no writes). "
+             "Must be combined with --yes.",
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help="Required together with --apply as an explicit confirmation. --apply alone does nothing.",
     )
     parser.add_argument(
         "--mock", action="store_true",
@@ -83,16 +109,25 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    apply_mode = args.apply and args.yes
+    if args.apply and not args.yes:
+        print("[dry_run_evaluation] --apply was given without --yes — refusing to apply. "
+              "Falling back to dry-run. Pass both --apply --yes to actually write changes.")
+
     import db.database as db
     if args.db:
         db.DB_PATH = Path(args.db)
         print(f"[dry_run_evaluation] Using DB: {db.DB_PATH}")
     else:
         print(f"[dry_run_evaluation] WARNING: using the real production DB: {db.DB_PATH}")
-        print("[dry_run_evaluation] This will write ONE evaluation_runs bookkeeping row "
-              "(dry_run=True). It will NOT change any watchlist state.")
+        if apply_mode:
+            print("[dry_run_evaluation] *** APPLY MODE against the REAL PRODUCTION DB. ***")
+            print("[dry_run_evaluation] This WILL write real watchlist state changes.")
+        else:
+            print("[dry_run_evaluation] This will write ONE evaluation_runs bookkeeping row "
+                  "(dry_run=True). It will NOT change any watchlist state.")
 
-    from services.watchlist_evaluator import run_dry_run_evaluation
+    from services.watchlist_evaluator import run_watchlist_evaluation
 
     client = None
     if args.mock:
@@ -120,8 +155,8 @@ def main() -> None:
 
         client = _MockClient()
 
-    result = run_dry_run_evaluation(client=client, triggered_by="manual-cli")
-    _print_summary(result)
+    result = run_watchlist_evaluation(apply=apply_mode, client=client, triggered_by="manual-cli")
+    _print_summary(result, apply_mode)
 
 
 if __name__ == "__main__":
