@@ -271,5 +271,78 @@ class TestSafety(TelegramWatchlistDisplayTestCase):
         self.assertIsNone(self.db.get_last_evaluation_run())
 
 
+class TestCommandMenuRegistration(unittest.TestCase):
+    """
+    Covers the bug where new commands worked when typed manually but never
+    appeared in Telegram's hamburger/menu list -- _BOT_COMMANDS had fallen
+    out of sync with the actual CommandHandler registrations.
+    """
+
+    def setUp(self):
+        import bot.telegram_bot as bot_mod
+        self.bot = bot_mod
+
+    def _registered_handler_commands(self) -> set[str]:
+        import inspect
+        import re
+        source = inspect.getsource(self.bot.run_bot)
+        return set(re.findall(r'CommandHandler\("([a-zA-Z_]+)"', source))
+
+    def test_menu_includes_every_registered_handler_command(self):
+        handler_cmds = self._registered_handler_commands()
+        menu_cmds = {c.command for c in self.bot._BOT_COMMANDS}
+        self.assertEqual(handler_cmds, menu_cmds)
+
+    def test_menu_has_no_phantom_commands(self):
+        """Every menu entry must correspond to a real, registered handler."""
+        handler_cmds = self._registered_handler_commands()
+        for bot_command in self.bot._BOT_COMMANDS:
+            self.assertIn(bot_command.command, handler_cmds)
+
+    def test_new_watchlist_commands_are_in_menu(self):
+        menu_cmds = {c.command for c in self.bot._BOT_COMMANDS}
+        for expected in (
+            "refresh_watchlist", "watchlist_refresh_status", "watchlist_changes",
+            "watchlist_active", "watchlist_monitor", "watchlist_context",
+            "watchlist_ineligible", "watchlist_status",
+        ):
+            self.assertIn(expected, menu_cmds)
+
+    def test_no_command_name_contains_slash(self):
+        for bot_command in self.bot._BOT_COMMANDS:
+            self.assertNotIn("/", bot_command.command)
+
+    def test_command_names_and_descriptions_within_telegram_limits(self):
+        for bot_command in self.bot._BOT_COMMANDS:
+            self.assertLessEqual(len(bot_command.command), 32)
+            self.assertLessEqual(len(bot_command.description), 256)
+            self.assertGreater(len(bot_command.description), 0)
+
+    def test_under_telegram_total_command_limit(self):
+        self.assertLessEqual(len(self.bot._BOT_COMMANDS), 100)
+
+    def test_registration_success_calls_set_my_commands(self):
+        application = MagicMock()
+        application.bot.set_my_commands = AsyncMock()
+        _run(self.bot._register_bot_commands(application))
+        application.bot.set_my_commands.assert_awaited_once_with(self.bot._BOT_COMMANDS)
+
+    def test_registration_failure_is_non_fatal(self):
+        application = MagicMock()
+        application.bot.set_my_commands = AsyncMock(side_effect=RuntimeError("transient API error"))
+        try:
+            _run(self.bot._register_bot_commands(application))
+        except Exception as exc:
+            self.fail(f"_register_bot_commands raised instead of swallowing the error: {exc}")
+
+    def test_registration_failure_does_not_leak_secrets(self):
+        application = MagicMock()
+        application.bot.set_my_commands = AsyncMock(side_effect=RuntimeError("api_key=super-secret-token"))
+        with patch("builtins.print") as mock_print:
+            _run(self.bot._register_bot_commands(application))
+        logged = " ".join(str(c.args) for c in mock_print.call_args_list)
+        self.assertNotIn("super-secret-token", logged)
+
+
 if __name__ == "__main__":
     unittest.main()

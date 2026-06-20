@@ -1131,31 +1131,53 @@ async def cmd_watchlist_changes(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ── Bot runner ────────────────────────────────────────────────────────────────
 
+# Every entry here must correspond to a real CommandHandler registered
+# below in run_bot() -- this is the full inventory, not a curated subset.
 _BOT_COMMANDS = [
-    BotCommand("analyze",   "ניתוח טכני מלא"),
-    BotCommand("scan",      "סריקת מניות חמות"),
-    BotCommand("watchlist", "הצג את כל המניות"),
-    BotCommand("add",       "הוסף מניה לרשימה"),
-    BotCommand("remove",    "הסר מניה"),
-    BotCommand("trade",     "תעד עסקה"),
-    BotCommand("trades",    "היסטוריית עסקאות"),
-    BotCommand("summary",   "סיכום פוזיציה"),
-    BotCommand("alerts",    "התראות היום"),
-    BotCommand("status",    "סטטוס שוק"),
-    BotCommand("test",      "בדיקת חיבור"),
-    BotCommand("language",  "שנה שפה / Change language"),
-    BotCommand("help",      "תפריט פקודות"),
+    BotCommand("start",      "התחלה"),
+    BotCommand("help",       "תפריט פקודות"),
+    BotCommand("language",   "שנה שפה / Change language"),
+    BotCommand("scan",       "סריקת מניות חמות"),
+    BotCommand("test",       "בדיקת חיבור"),
+    BotCommand("analyze",    "ניתוח טכני מלא"),
+    BotCommand("add",        "הוסף מניה לרשימה"),
+    BotCommand("remove",     "הסר מניה"),
+    BotCommand("watchlist",  "סיכום רשימת מעקב"),
+    BotCommand("trade",      "תעד עסקה"),
+    BotCommand("trades",     "היסטוריית עסקאות"),
+    BotCommand("summary",    "סיכום פוזיציה"),
+    BotCommand("alerts",     "התראות היום"),
+    BotCommand("status",     "סטטוס שוק"),
+    BotCommand("watchlist_active",         "Show ACTIVE symbols"),
+    BotCommand("watchlist_monitor",        "Show MONITOR symbols"),
+    BotCommand("watchlist_context",        "Show ETF/index context symbols"),
+    BotCommand("watchlist_ineligible",     "Show temporarily ineligible symbols"),
+    BotCommand("watchlist_status",         "Show status for one symbol"),
+    BotCommand("refresh_watchlist",        "Run a safe watchlist refresh (dry-run)"),
+    BotCommand("watchlist_refresh_status", "Show last refresh status"),
+    BotCommand("watchlist_changes",        "Show recent watchlist changes"),
 ]
+
+
+async def _register_bot_commands(application) -> None:
+    """
+    Registers the Telegram hamburger/menu command list. Best-effort: a
+    failure here (e.g. a transient Telegram API error) must never prevent
+    the bot from starting and serving commands. Never logs secrets,
+    tokens, chat IDs, DB paths, or a stack trace -- only the exception
+    type name.
+    """
+    try:
+        await application.bot.set_my_commands(_BOT_COMMANDS)
+    except Exception as exc:
+        print(f"[telegram] Failed to register command menu: {type(exc).__name__}")
 
 
 def run_bot(token: str) -> None:
     init_db(WATCHLIST)
     run_initial_classification(WATCHLIST)
 
-    async def post_init(application) -> None:
-        await application.bot.set_my_commands(_BOT_COMMANDS)
-
-    app = ApplicationBuilder().token(token).post_init(post_init).build()
+    app = ApplicationBuilder().token(token).post_init(_register_bot_commands).build()
 
     app.add_handler(CommandHandler("start",                cmd_start))
     app.add_handler(CommandHandler("help",                 cmd_help))
