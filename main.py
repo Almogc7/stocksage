@@ -20,17 +20,19 @@ from agent.core import start_agent
 from bot.telegram_bot import run_bot
 
 if __name__ == "__main__":
-    print("🚀 StockSage starting...")
+    # Plain ASCII only here -- Windows CMD's default codepage (cp1252/cp850)
+    # cannot encode emoji and would raise UnicodeEncodeError on print().
+    print("[*] StockSage starting...")
 
     # Init database and load watchlist
     init_db()
     populate_from_config(WATCHLIST)
-    print("✅ Database ready")
+    print("[OK] Database ready")
 
     # Start background agent in separate thread
     start_agent(TOKEN, CHAT_ID)
-    print("✅ Agent running in background")
+    print("[OK] Agent running in background")
 
     # Start Telegram bot (blocking - must be last)
-    print("✅ Bot listening for commands...")
+    print("[OK] Bot listening for commands...")
     run_bot(TOKEN)

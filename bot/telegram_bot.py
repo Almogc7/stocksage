@@ -5,6 +5,7 @@ _ET = ZoneInfo("America/New_York")
 
 from telegram import BotCommand, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 from agent.core import run_morning_scan
@@ -14,7 +15,7 @@ from config import (
     CATEGORIES, DEFAULT_LANGUAGE, TELEGRAM_ALLOW_WATCHLIST_APPLY,
     WATCHLIST, WATCHLIST_CHANGES_DEFAULT_LIMIT, WATCHLIST_CHANGES_MAX_LIMIT,
 )
-from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
+from data.fetcher import get_current_price, get_historical, is_market_open
 from db.database import (
     add_to_watchlist,
     get_active_watchlist,
@@ -357,8 +358,74 @@ def _fmt_analysis(analysis: dict, lang: str = "he") -> str:
     return "\n".join(lines)
 
 
+# Telegram's hard limit is 4096 characters; stay well under it so
+# formatting/markdown overhead never tips a chunk over the real limit.
+TELEGRAM_SAFE_CHUNK_LIMIT = 3500
+
+
+def _split_into_chunks(text: str, limit: int = TELEGRAM_SAFE_CHUNK_LIMIT) -> list[str]:
+    """
+    Split text into chunks of at most `limit` characters, breaking on line
+    boundaries wherever possible. A single line longer than `limit` is hard
+    -split as a last resort (this should be rare — most callers build
+    output line-by-line). Never returns an empty/whitespace-only chunk.
+    """
+    if not text or not text.strip():
+        return []
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    def _flush() -> None:
+        if current:
+            chunks.append("\n".join(current))
+            current.clear()
+
+    for line in text.split("\n"):
+        if len(line) > limit:
+            _flush()
+            current_len = 0
+            for start in range(0, len(line), limit):
+                chunks.append(line[start:start + limit])
+            continue
+
+        added_len = len(line) + (1 if current else 0)
+        if current and current_len + added_len > limit:
+            _flush()
+            current_len = 0
+            added_len = len(line)
+
+        current.append(line)
+        current_len += added_len
+
+    _flush()
+    return [c for c in chunks if c.strip()]
+
+
 async def _send(update: Update, text: str) -> None:
-    await update.message.reply_text(text)
+    """
+    Send text to the chat, automatically splitting it into multiple
+    Telegram-safe messages if it's too long. Never crashes the calling
+    handler — a BadRequest (e.g. from an unexpected over-length chunk) is
+    logged safely (no message content/secrets) and replaced with a short
+    fallback notice instead of propagating.
+    """
+    for chunk in _split_into_chunks(text):
+        try:
+            await update.message.reply_text(chunk)
+        except BadRequest as exc:
+            print(f"[telegram] BadRequest sending message: {exc}")
+            try:
+                await update.message.reply_text(
+                    "⚠️ Message too long to display. Try a more specific command "
+                    "(e.g. add a number or symbol filter)."
+                )
+            except Exception:
+                pass
+            return
 
 
 # ── Command handlers ──────────────────────────────────────────────────────────
@@ -466,40 +533,41 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Summary-only by design — the watchlist can hold hundreds of symbols
+    (it's seeded from config.py's full multi-category list), and dumping
+    every symbol with a live price here previously produced a single
+    Telegram message that could exceed the 4096-character limit and crash
+    the handler with BadRequest("Message is too long"). Use the tier-
+    specific commands below for the actual symbol lists, which are already
+    bounded/paginated.
+    """
     if not await _check_auth(update):
         return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
 
-    wl = get_watchlist()
-    if not wl:
+    summary = get_watchlist_summary()
+    if not summary:
         await _send(update, s["watchlist_empty"])
         return
 
-    summary = get_watchlist_summary()
-    tier_line = (
-        f"Active: {summary.get('ACTIVE', 0)} | "
-        f"Monitor: {summary.get('MONITOR', 0)} | "
-        f"ETF/Index: {summary.get('ETF_INDEX_CONTEXT', 0)}\n"
-    )
-
-    all_symbols = [sym for symbols in wl.values() for sym in symbols]
-    await _send(update, s["fetching_prices"])
-    prices = get_multiple_prices(all_symbols)
-
-    lines = [tier_line + f"{s['watchlist_title']}\n"]
-    for category, symbols in wl.items():
-        lines.append(f"\U0001f4c2 {category}")
-        for sym in symbols:
-            p = prices.get(sym)
-            if p:
-                sign = "+" if p["change_pct"] >= 0 else ""
-                lines.append(f"  {sym:<6} ${p['price']:>9,.2f}  {sign}{p['change_pct']}%")
-            else:
-                lines.append(f"  {sym:<6}  N/A")
-        lines.append("")
-
-    await _send(update, "\n".join(lines).strip())
+    lines = [
+        s["watchlist_title"],
+        "",
+        f"ACTIVE: {summary.get('ACTIVE', 0)}",
+        f"MONITOR: {summary.get('MONITOR', 0)}",
+        f"ETF/Index context: {summary.get('ETF_INDEX_CONTEXT', 0)}",
+        f"Temporarily ineligible: {summary.get('TEMPORARILY_INELIGIBLE', 0)}",
+        f"User removed: {summary.get('USER_REMOVED', 0)}",
+        "",
+        "For details, use:",
+        "/watchlist_active",
+        "/watchlist_monitor",
+        "/watchlist_context",
+        "/watchlist_ineligible",
+    ]
+    await _send(update, "\n".join(lines))
 
 
 async def cmd_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -751,10 +819,21 @@ async def cmd_watchlist_active(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def cmd_watchlist_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    MONITOR can hold hundreds of symbols, so this never lists all of them —
+    only the top-N scored candidates (default 10, override with e.g.
+    "/watchlist_monitor 50", capped at 100 to stay well under the safe
+    Telegram chunk limit even before _send()'s own splitting kicks in).
+    """
     if not await _check_auth(update):
         return
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
+
+    limit = 10
+    if context.args and context.args[0].isdigit():
+        limit = min(int(context.args[0]), 100)
+
     symbols = get_symbols_by_state('MONITOR')
     lines = [f"{s['wl_monitor_title']} — {len(symbols)} symbols"]
     scored = []
@@ -764,9 +843,12 @@ async def cmd_watchlist_monitor(update: Update, context: ContextTypes.DEFAULT_TY
             scored.append((sym, status['relevance_score']))
     scored.sort(key=lambda x: x[1], reverse=True)
     if scored:
-        lines.append(f"\n{s['wl_top_candidates']}:")
-        for sym, score in scored[:10]:
+        lines.append(f"\n{s['wl_top_candidates']} (showing {min(limit, len(scored))} of {len(scored)} scored):")
+        for sym, score in scored[:limit]:
             lines.append(f"  {sym} [{score}]")
+        remaining = len(scored) - limit
+        if remaining > 0:
+            lines.append(f"  (+{remaining} more — use /watchlist_monitor {min(limit * 2, 100)} for more)")
     await _send(update, "\n".join(lines))
 
 
