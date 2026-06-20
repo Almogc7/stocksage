@@ -377,3 +377,113 @@ reset.
 
 **Affects production behavior** | No — purely additive bookkeeping table,
 nothing yet calls these functions outside of tests.
+
+## Entry 18 — Feat: add market data validation layer (Phase 3)
+
+| Field | Value |
+|---|---|
+| **Commit** | (pending — see `git log` after commit) |
+| **Files changed** | `data/market_data_validator.py` (new), `config.py`, `tests/test_market_data_validator.py` (new), `CLAUDE_CHANGES.md` |
+| **New test count** | 212 total (33 new) — all pass, all mocked, zero live network calls |
+
+Pure data-quality/retrieval layer for the dynamic watchlist lifecycle. Does
+**not** decide promotion/demotion, does not write to any database table,
+does not schedule anything, and does not send Telegram messages.
+
+**Existing-fetcher audit (done before writing any code):**
+1. yfinance is used only in `data/fetcher.py`.
+2. Existing functions: `get_current_price` (yf.Ticker.fast_info), `get_historical`
+   (yf.download, single symbol), `get_multiple_prices` (yf.download batch,
+   2-day window, group_by="ticker"), `get_52week_high_low` (yf.download, 1y).
+3. None were reused directly — `get_historical`'s single-symbol shape was
+   close but lacks retry/backoff/classification; `get_multiple_prices`'s
+   batch shape was the model for the new batch fetcher but only fetches a
+   2-day window (too short for a 60+ day liquidity lookback) and silently
+   coerces NaN to 0 rather than reporting a data-quality status.
+4. Existing code uses **adjusted** prices everywhere (`auto_adjust=True`).
+   The new module follows the same convention for consistency.
+5. Existing code handles missing data ad hoc (NaN→0 fallback in
+   `get_multiple_prices`, `None` return in `get_historical`) without a
+   structured status; the new module replaces "ad hoc" with explicit
+   `ProviderStatus` categories.
+6. Indexes/ETFs: only handled via a one-off `three_month_average_volume`
+   None-check in `get_current_price`; no broader safety net.
+7. **No existing caching anywhere** in `data/fetcher.py`.
+8. **Yes**, excessive requests are possible today: a full classification
+   pass over ~400 symbols would mean ~400 individual `get_historical()`
+   calls with no batching and no cache — exactly the gap this phase closes.
+
+**New module — `data/market_data_validator.py`:**
+- `ProviderStatus` enum: OK, INVALID_SYMBOL, UNSUPPORTED_SECURITY_TYPE,
+  EMPTY_HISTORY, INSUFFICIENT_HISTORY, MISSING_OHLCV, STALE_DATA,
+  INCOMPLETE_DAILY_CANDLE, ZERO_VOLUME, MISSING_VOLUME, PROVIDER_ERROR,
+  RATE_LIMITED, TEMPORARY_FAILURE, UNKNOWN_ERROR.
+- `MarketDataResult` dataclass — symbol/security_type/provider_status,
+  is_valid/is_stale/is_complete_daily_candle/has_sufficient_history/
+  has_required_ohlcv, latest_close/volume, average_daily_volume,
+  average_daily_dollar_volume, history_days_available,
+  data_timestamp_utc, latest_completed_candle_date, failure_type,
+  failure_reason, retry_after_utc, warnings, raw_metadata (always empty
+  in this phase — no secrets).
+- `summarize_history(symbol, df, ...)` — pure function, no network calls;
+  does all classification/validation given an already-fetched DataFrame
+  (or `None`). This is what almost all tests exercise directly.
+- `MarketDataClient` — stateful per-evaluation-run client: `get_history`/
+  `get_history_batch` (chunked, cached, bounded-retry), `validate`/
+  `validate_batch`, `.stats` (cache_hits/cache_misses/
+  yfinance_request_count/provider_error_count).
+
+**Completed-daily-candle rule:** reuses the exact convention already
+tested in `tests/test_incomplete_candle.py` (Gate 9 in `agent/core.py`):
+when the market is open, drop the last (forming) row; when closed, keep
+it. **Documented limitation:** no market-holiday calendar — this is a
+conservative Mon-Fri rule only, no new dependency was added.
+
+**Freshness rule:** gap between the most recent *expected* weekday and the
+latest *completed* candle must not exceed `config.ELIGIBILITY_STALE_DAYS`
+(reused, default 3) or the result is `STALE_DATA`. A single missing
+trading day (e.g. an undetected holiday) is tolerated by this threshold —
+documented, not a bug. Stale data is explicitly `is_valid=True` (the
+ticker is real) but `provider_status != OK` (not safe to evaluate now).
+
+**Liquidity formulas:** `average_daily_volume` = mean of valid (non-NaN,
+non-negative, numeric-coerced) volume over the lookback window
+(`config.ELIGIBILITY_LOOKBACK_DAYS`, reused, default 63, configurable).
+`average_daily_dollar_volume` = mean of (close × volume) per completed
+day over the same window — not `avg_volume × latest_close` — documented
+as more robust against price drift.
+
+**Batching/caching/retries:** `get_history_batch` chunks by
+`config.MARKET_DATA_BATCH_SIZE` (default 50), degrades a whole-chunk
+failure to per-symbol fallback fetches, and preserves the caller's symbol
+order. `MarketDataClient` caches successful fetches in memory for its own
+lifetime (one evaluation run); failures are never cached. `_fetch_single`
+retries up to `config.MARKET_DATA_MAX_RETRIES` (default 2) with
+`base * 2**attempt` backoff for transient/rate-limited errors only —
+`INVALID_SYMBOL` is never retried.
+
+**New config constants:** `MARKET_DATA_MIN_HISTORY_DAYS` (30),
+`MARKET_DATA_HISTORY_PERIOD` ("6mo"), `MARKET_DATA_MAX_RETRIES` (2),
+`MARKET_DATA_RETRY_BACKOFF_SECONDS` (1.5), `MARKET_DATA_BATCH_SIZE` (50),
+`MARKET_DATA_PROVIDER_ERROR_RETRY_HOURS` (4),
+`MARKET_DATA_INVALID_SYMBOL_RETRY_HOURS` (168),
+`MARKET_DATA_DATA_QUALITY_RETRY_HOURS` (24) — all overridable via env vars.
+
+**Testing note (correction from Phase 2):** no smoke test was run against
+the real database this phase. `test_fetch.py` was deliberately **not**
+run because it calls `init_db()` against the real production DB. Instead,
+a one-off manual check imported the module and called `MarketDataClient.validate()`
+with `yf.download` mocked — zero network calls, zero DB writes — confirming
+the public API works end-to-end. The 33 automated tests mock `yf.download`
+exclusively and never import `db.database` (asserted by a dedicated test).
+
+**Revert command:**
+```
+git revert <commit-hash-of-this-entry>
+```
+Note: purely additive (new module, new config constants); does not modify
+any existing function used by other code, so reverting is safe.
+
+**Affects production behavior** | No — nothing in `bot/telegram_bot.py` or
+`agent/core.py` calls this module yet. It is unused until Phase 4 wires it
+into a live daily evaluator.

@@ -522,3 +522,33 @@ ETF_ALERTS_ENABLED: bool = os.getenv("ETF_ALERTS_ENABLED", "false").lower() == "
 
 # Categories considered to be bank/financial sector (used for bank-cap enforcement)
 BANK_CATEGORIES: frozenset[str] = frozenset(["פיננסים"])
+
+# ─────────────────────────────────────────────
+#  Market Data Validation (Phase 3 — data/market_data_validator.py)
+# ─────────────────────────────────────────────
+# Minimum number of completed daily candles required to evaluate a symbol
+MARKET_DATA_MIN_HISTORY_DAYS: int = int(os.getenv("MARKET_DATA_MIN_HISTORY_DAYS", "30"))
+
+# yfinance period string used when fetching daily history for validation
+# (must comfortably cover ELIGIBILITY_LOOKBACK_DAYS plus a safety buffer)
+MARKET_DATA_HISTORY_PERIOD: str = os.getenv("MARKET_DATA_HISTORY_PERIOD", "6mo")
+
+# Bounded retries for transient yfinance failures (not for invalid symbols)
+MARKET_DATA_MAX_RETRIES: int = int(os.getenv("MARKET_DATA_MAX_RETRIES", "2"))
+
+# Base backoff seconds; actual wait is base * (2 ** attempt), capped
+MARKET_DATA_RETRY_BACKOFF_SECONDS: float = float(os.getenv("MARKET_DATA_RETRY_BACKOFF_SECONDS", "1.5"))
+
+# Max symbols per yfinance batch download call
+MARKET_DATA_BATCH_SIZE: int = int(os.getenv("MARKET_DATA_BATCH_SIZE", "50"))
+
+# How long to wait before retrying a symbol that hit a transient provider error
+MARKET_DATA_PROVIDER_ERROR_RETRY_HOURS: int = int(os.getenv("MARKET_DATA_PROVIDER_ERROR_RETRY_HOURS", "4"))
+
+# How long to wait before retrying a symbol classified as invalid/unsupported
+# (long, to avoid hammering a permanently broken ticker on every daily run)
+MARKET_DATA_INVALID_SYMBOL_RETRY_HOURS: int = int(os.getenv("MARKET_DATA_INVALID_SYMBOL_RETRY_HOURS", "168"))
+
+# How long to wait before re-checking a symbol with a data-quality problem
+# (stale data, insufficient history, missing volume, etc.)
+MARKET_DATA_DATA_QUALITY_RETRY_HOURS: int = int(os.getenv("MARKET_DATA_DATA_QUALITY_RETRY_HOURS", "24"))
