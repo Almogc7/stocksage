@@ -142,9 +142,25 @@ streamlit run stocksage/dashboard.py
 |---|---|---|
 | `TELEGRAM_TOKEN` | Bot token from @BotFather | ✅ Yes |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat/user ID for alert delivery | ✅ Yes |
+| `AUTHORIZED_CHAT_IDS` | Comma-separated chat IDs allowed to issue bot commands (falls back to `TELEGRAM_CHAT_ID` if unset) | Optional |
 | `ANTHROPIC_API_KEY` | Claude AI API key | Optional |
 | `ALPHA_VANTAGE_KEY` | Alpha Vantage key for supplementary data | Optional |
 | `NEWS_API_KEY` | NewsAPI key for sentiment analysis | Optional |
+
+### Watchlist lifecycle variables (safe defaults — leave unset initially)
+
+| Variable | Description | Default |
+|---|---|---|
+| `TELEGRAM_ALLOW_WATCHLIST_APPLY` | Allow `/refresh_watchlist apply confirm` to write real changes from Telegram | `false` |
+| `WATCHLIST_SCHEDULE_APPLY` | Allow an unattended scheduled run to apply real changes (no automatic scheduler runs yet regardless) | `false` |
+| `WATCHLIST_SCHEDULE_HOUR_ET` / `WATCHLIST_SCHEDULE_MINUTE_ET` | Daily evaluation time, America/New_York | `17` / `30` |
+| `WATCHLIST_SCHEDULE_STUCK_RUN_TIMEOUT_MINUTES` | Minutes before a stuck `started` run is auto-marked failed | `60` |
+| `WATCHLIST_EXTRA_HOLIDAY_DATES` | Extra comma-separated US market closure dates (`YYYY-MM-DD`) beyond the built-in holiday calendar | empty |
+| `WATCHLIST_PROVIDER_OUTAGE_THRESHOLD_PCT` | Fraction of transient yfinance failures that triggers provider-degraded handling | `0.4` |
+| `ACTIVE_MAX_SIZE` / `ACTIVE_BANK_MAX` | ACTIVE-tier symbol cap / bank-sector sub-cap | `30` / `8` |
+| `PROMOTION_THRESHOLD` / `DEMOTION_THRESHOLD` | Relevance-score thresholds for tier transitions | `60` / `45` |
+
+See `CLAUDE_CHANGES.md` and `STOCKSAGE_FINAL_ROLLOUT_PLAN.md` for the full list and recommended rollout order — **leave `TELEGRAM_ALLOW_WATCHLIST_APPLY` and `WATCHLIST_SCHEDULE_APPLY` unset (false) until you've reviewed several days of dry-run output.**
 
 ---
 
@@ -166,6 +182,31 @@ streamlit run stocksage/dashboard.py
 | `/language <he\|en>` | Switch bot language (Hebrew / English) |
 | `/test` | Send a test alert to confirm the bot is working |
 | `/help` | Show all available commands |
+
+### Watchlist lifecycle commands
+
+These require authorization like every other command above. The watchlist
+itself is multi-tier (ACTIVE / MONITOR / ETF_INDEX_CONTEXT /
+TEMPORARILY_INELIGIBLE / USER_REMOVED), persisted in SQLite, and evaluated
+by a dry-run/apply engine — see `CLAUDE_CHANGES.md` and
+`STOCKSAGE_FINAL_ROLLOUT_PLAN.md` for the full design.
+
+| Command | Description |
+|---|---|
+| `/watchlist_active` | List ACTIVE-tier symbols (the ones actually scanned for alerts) with their relevance score |
+| `/watchlist_monitor` | List MONITOR-tier symbols (tracked, not yet scanned) |
+| `/watchlist_context` | List ETF/index/crypto symbols (price context only, never scanned for BUY alerts) |
+| `/watchlist_ineligible` | List TEMPORARILY_INELIGIBLE symbols and why |
+| `/watchlist_status <SYMBOL>` | Full tier/score/streak detail for one symbol |
+| `/refresh_watchlist` | Run a watchlist eligibility evaluation — **dry-run by default, never changes any state** |
+| `/refresh_watchlist apply confirm` | Apply real changes — **disabled unless `TELEGRAM_ALLOW_WATCHLIST_APPLY=true`**, and still requires the literal word `confirm` |
+| `/watchlist_refresh_status` | Show the most recent evaluation run's status/counts |
+| `/watchlist_changes [N] [run ID]` | Show promotions/demotions/recoveries/newly-ineligible from the latest (or a specific) run |
+
+**Safety notes:**
+- `/refresh_watchlist` with no arguments, or `/refresh_watchlist dry_run`, is always safe — it never writes to the watchlist.
+- `/refresh_watchlist apply` (without `confirm`, or with the config flag off) is refused with a clear message — it never silently applies.
+- Rollback of an applied run is **CLI-only**, by design — see `scripts/rollback_evaluation_run.py` in the rollout plan. There is no Telegram rollback command.
 
 ---
 

@@ -960,3 +960,61 @@ anywhere except this commit's `run_bot()` handler list, and apply mode
 stays disabled by default (`TELEGRAM_ALLOW_WATCHLIST_APPLY=false`). No
 real Telegram bot was started this session; everything was exercised via
 mocked `Update`/`Context` objects against temp databases.
+
+## Entry 24 — Docs: final hardening and rollout documentation
+
+| Field | Value |
+|---|---|
+| **Commit** | (pending — see `git log` after commit) |
+| **Files changed** | `STOCKSAGE_FINAL_ROLLOUT_PLAN.md` (new), `README.md`, `.env.example`, `CLAUDE_CHANGES.md` |
+| **Code changes** | None — no confirmed issue was found that required a code fix. |
+
+Final review and documentation pass before merge consideration. No new
+features, no scoring changes, no production DB writes.
+
+**Validation performed before writing the report:**
+- Full test suite: 349/349 passing.
+- No linter/type-checker is configured for this project (confirmed —
+  `test_fetch.py` remains the closest thing to an integration smoke test,
+  per `CLAUDE.md`); `python -m py_compile` on changed files passes clean.
+- Mocked Telegram command validation: re-ran `tests/test_telegram_watchlist_refresh.py`
+  (26 tests) — all pass, all using mocked `Update`/`Context`.
+- Copied-DB dry-run, apply (×2), and rollback validation — full results in
+  `STOCKSAGE_FINAL_ROLLOUT_PLAN.md` §11. Summary: dry-run clean (0
+  failures), apply #1 warm-up (0 promotions, expected), apply #2 promoted
+  30 symbols (ACTIVE 0→30, bank-ACTIVE 1/8), rollback of #2 restored the
+  copy to exactly the post-#1 state.
+- Confirmed: production DB untouched (mtime/row counts identical, the
+  validation copy never wrote to it); no real Telegram messages sent (all
+  tests use `AsyncMock`); `.env` not modified (mtime unchanged all
+  session — last touched 2026-06-17, before this work began); `.env.example`
+  contains placeholders only (read and verified line-by-line); the
+  validation DB copy was deleted after use and was gitignored throughout
+  (`db/*.db`); backup branch untouched (still at `cbb21b9`).
+
+**Documentation added/updated:**
+- `STOCKSAGE_FINAL_ROLLOUT_PLAN.md` (new) — executive summary, branch
+  status, environment variables, migration plan, step-by-step rollout,
+  safe commands, Telegram command guide, rollback plan (git/DB/run-level),
+  what not to enable yet, final validation results, remaining risks,
+  recommended future work, and merge recommendation.
+- `README.md` — added `AUTHORIZED_CHAT_IDS` to the existing env var table,
+  a new "Watchlist lifecycle variables" subsection, and a new "Watchlist
+  lifecycle commands" subsection documenting all 10 watchlist/refresh
+  Telegram commands with explicit safety notes.
+- `.env.example` — added `TELEGRAM_ALLOW_WATCHLIST_APPLY` and
+  `WATCHLIST_SCHEDULE_APPLY` as documented placeholders (both `false`),
+  with a comment pointing at this rollout plan before enabling either.
+
+**No confirmed code issue was found during this phase** — nothing was
+fixed beyond documentation, per the instruction to only make code changes
+for a confirmed issue and to stop and report first if one were found.
+
+**Revert command:**
+```
+git revert <commit-hash-of-this-entry>
+```
+Note: documentation-only commit; reverting has no effect on runtime
+behavior.
+
+**Affects production behavior** | No.
