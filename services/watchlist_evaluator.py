@@ -357,6 +357,8 @@ def run_watchlist_evaluation(
     client: MarketDataClient | None = None,
     triggered_by: str = "manual",
     now: datetime | None = None,
+    run_type: str | None = None,
+    extra_metadata: dict | None = None,
 ) -> DryRunEvaluationResult:
     """
     Run one full eligibility evaluation pass.
@@ -371,17 +373,27 @@ def run_watchlist_evaluation(
     apply_evaluation_changes) and this function marks the evaluation_runs
     row 'failed' — no partial state survives a failed apply.
 
+    run_type defaults to "manual" if apply else "dry_run"; pass
+    run_type="scheduled" (services/watchlist_scheduler.py does) to tag a
+    run as scheduler-triggered regardless of its apply/dry-run flavor —
+    the dry_run column already captures that orthogonally.
+
+    extra_metadata is merged into the evaluation_runs metadata_json (e.g.
+    the scheduler's market_date / schedule_reason) without this function
+    needing to know what the caller wants to record.
+
     Always records an evaluation_runs row (dry_run=not apply).
     """
     client = client or MarketDataClient()
     now = now or datetime.now(timezone.utc)
+    real_start = datetime.now(timezone.utc)  # wall clock, for genuine duration measurement
     started_at = now.strftime("%Y-%m-%d %H:%M:%S")
     today_str = now.date().isoformat()
 
     summary_before = db.get_watchlist_summary()
-    run_type = "manual" if apply else "dry_run"
+    run_type = run_type or ("manual" if apply else "dry_run")
     run_id = db.create_evaluation_run(
-        run_type, dry_run=not apply, triggered_by=triggered_by,
+        run_type, dry_run=not apply, triggered_by=triggered_by, started_at=started_at,
         active_before=summary_before.get("ACTIVE", 0),
         monitor_before=summary_before.get("MONITOR", 0),
         context_count=summary_before.get("ETF_INDEX_CONTEXT", 0),
@@ -427,15 +439,17 @@ def run_watchlist_evaluation(
             result.applied = True
     except Exception as exc:  # fatal error — never leave a half-applied run
         result.fatal_error = f"{type(exc).__name__}: {exc}"
-        completed = datetime.now(timezone.utc)
+        real_elapsed = (datetime.now(timezone.utc) - real_start).total_seconds()
+        completed = now + timedelta(seconds=real_elapsed)
         result.completed_at = completed.strftime("%Y-%m-%d %H:%M:%S")
-        result.duration_seconds = (completed - now).total_seconds()
-        db.update_evaluation_run_failure(run_id, result.fatal_error)
+        result.duration_seconds = real_elapsed
+        db.update_evaluation_run_failure(run_id, result.fatal_error, completed_at=result.completed_at)
         return result
 
-    completed = datetime.now(timezone.utc)
+    real_elapsed = (datetime.now(timezone.utc) - real_start).total_seconds()
+    completed = now + timedelta(seconds=real_elapsed)
     result.completed_at = completed.strftime("%Y-%m-%d %H:%M:%S")
-    result.duration_seconds = (completed - now).total_seconds()
+    result.duration_seconds = real_elapsed
 
     counts = dict(
         total_symbols_considered=result.total_symbols_considered,
@@ -465,13 +479,15 @@ def run_watchlist_evaluation(
         "provider_degraded": result.provider_degraded,
         "warnings": result.warnings,
     }
+    if extra_metadata:
+        metadata.update(extra_metadata)
     if result.provider_degraded:
         db.update_evaluation_run_partial_failure(
             run_id, "provider degraded: demotion proposals suppressed for this run",
-            metadata=metadata, **counts,
+            metadata=metadata, completed_at=result.completed_at, **counts,
         )
     else:
-        db.update_evaluation_run_success(run_id, metadata=metadata, **counts)
+        db.update_evaluation_run_success(run_id, metadata=metadata, completed_at=result.completed_at, **counts)
 
     return result
 

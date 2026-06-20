@@ -961,6 +961,7 @@ def create_evaluation_run(
     dry_run: bool = False,
     triggered_by: str | None = None,
     metadata: dict | None = None,
+    started_at: str | None = None,
     **counts,
 ) -> int:
     """
@@ -969,10 +970,17 @@ def create_evaluation_run(
     run_type must be one of: manual, scheduled, dry_run, startup.
     Any of the columns in _EVAL_RUN_COUNT_COLUMNS may be passed as initial
     values via **counts (e.g. total_symbols_considered=326).
+
+    started_at defaults to the real current UTC time; pass an explicit
+    value (matching the caller's injected "now") so a mocked-time test can
+    keep evaluation_runs.started_at consistent with that test's clock —
+    e.g. services/watchlist_scheduler.py's run-once-per-market-day check
+    depends on started_at reflecting the evaluation's logical "now", not
+    wall-clock time.
     """
     cols = ["run_type", "status", "started_at", "dry_run", "triggered_by", "metadata_json"]
     params: list = [
-        run_type, "started", _utc_now_str(), 1 if dry_run else 0, triggered_by,
+        run_type, "started", started_at or _utc_now_str(), 1 if dry_run else 0, triggered_by,
         json.dumps(metadata) if metadata is not None else None,
     ]
     for key, value in counts.items():
@@ -996,9 +1004,10 @@ def _finalize_evaluation_run(
     *,
     error_summary: str | None = None,
     metadata: dict | None = None,
+    completed_at: str | None = None,
     **counts,
 ) -> None:
-    completed_at = _utc_now_str()
+    completed_at = completed_at or _utc_now_str()
     with _connect() as conn:
         row = conn.execute(
             "SELECT started_at FROM evaluation_runs WHERE run_id = ?", (run_id,)

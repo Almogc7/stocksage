@@ -774,3 +774,112 @@ still work); does not modify any existing column, so reverting is safe.
 **Affects production behavior** | Not yet — nothing calls
 `rollback_evaluation_run()` automatically, and apply mode was not run
 against the real production DB this session (only its gitignored copy).
+
+## Entry 22 — Feat: add watchlist evaluation scheduler logic (Phase 6)
+
+| Field | Value |
+|---|---|
+| **Commit** | (pending — see `git log` after commit) |
+| **Files changed** | `services/watchlist_scheduler.py` (new), `services/watchlist_evaluator.py` (run_type/extra_metadata params + timestamp-injection fix), `db/database.py` (`started_at`/`completed_at` override params), `scripts/dry_run_evaluation.py` (+`--schedule-check`/`--scheduled-dry-run`/`--scheduled-apply`), `config.py` (+5 constants), `tests/test_watchlist_scheduler.py` (new), `CLAUDE_CHANGES.md` |
+| **New test count** | 323 total (35 new) — all pass |
+
+Decides *when* it's safe to run a watchlist eligibility evaluation. Pure
+library + CLI — **nothing in this phase runs automatically in the
+background**. `agent/core.py` and `main.py` are untouched; something (a
+human, or a later real scheduler integration) must call
+`run_scheduled_evaluation()` explicitly.
+
+**Bug found and fixed while building this phase:** `db.create_evaluation_run()`
+and the `_finalize_evaluation_run()` family always used the real wall-clock
+time for `started_at`/`completed_at`, ignoring any `now` injected into
+`run_watchlist_evaluation()`. This silently broke the scheduler's
+run-once-per-market-day check for every test (and for any future caller
+that injects a specific `now`) — a run's `started_at` would record the
+real current time instead of the logical time being tested. Fixed by
+adding optional `started_at`/`completed_at` override parameters to those
+`db/database.py` functions (default unchanged — real wall-clock time —
+so this is backward compatible) and threading them through from
+`run_watchlist_evaluation()`. `duration_seconds` still measures genuine
+wall-clock execution time; only the *stored timestamp* is anchored to the
+caller's logical `now` plus that real elapsed time.
+
+**Market calendar (`services/watchlist_scheduler.py`, no new dependency):**
+`is_us_market_day()`/`us_market_holidays()` compute the standard NYSE
+fixed-date and nth-weekday-of-month holidays algorithmically — New Year's
+Day, MLK Day, Presidents Day, Good Friday (Gregorian Easter algorithm),
+Memorial Day, Juneteenth, Independence Day, Labor Day, Thanksgiving,
+Christmas — with Saturday/Sunday observed-date shifting. **Documented
+limitation:** this cannot know about rare unscheduled NYSE closures; use
+`config.WATCHLIST_EXTRA_HOLIDAY_DATES` (comma-separated ISO dates) to add
+those manually. `is_early_close_day()` flags the two predictable early
+closes (day after Thanksgiving, Christmas Eve) but does **not** change
+scheduling — the default 17:30 America/New_York threshold is already
+safely after both a normal (16:00) and an early (~13:00) close.
+
+**Scheduling decision:** `should_run_watchlist_evaluation(now_utc)` →
+`(bool, reason)`. Refuses naive datetimes (`ValueError`). Checks, in
+order: weekend → holiday → before-close → already-ran-today. Reuses DST
+correctly via `zoneinfo` (verified at both the March DST-transition Monday
+and across summer/winter offsets in tests).
+
+**Run-once-per-market-day:** a *scheduled* run (`run_type='scheduled'`)
+that completed `success` or `partial_failure` for a given America/New_York
+market date blocks a same-day repeat. A **failed** scheduled run does
+**not** block a retry (the whole point of detecting a stuck/crashed run is
+that it should be retriable the same day). Manual or dry-run-CLI-triggered
+runs (`run_type` in `manual`/`dry_run`) never count toward this check at
+all — only a genuine scheduled run satisfies "today's scheduled run
+already happened." **Skipped attempts write no `evaluation_runs` row** —
+documented as a deliberate choice to keep that table free of "checked, not
+due" noise; the decision and reason are only visible in the CLI output /
+return value of `run_scheduled_evaluation()`.
+
+**Concurrency guard:** `can_start_evaluation_run()` first sweeps any
+`started`-status run older than `WATCHLIST_SCHEDULE_STUCK_RUN_TIMEOUT_MINUTES`
+(default 60) via `mark_stuck_runs_failed()` (marks it `failed` with an
+explanatory `error_summary`), then refuses to start only if a genuinely
+fresh run is still in progress. No distributed locking — single-process
+scope, per spec.
+
+**Apply-mode safety:** `run_scheduled_evaluation(apply=None)` resolves to
+`config.WATCHLIST_SCHEDULE_APPLY` (default `False` — env var
+`WATCHLIST_SCHEDULE_APPLY=true` to change). An explicit `apply=True/False`
+argument (e.g. a deliberate CLI `--scheduled-apply --yes`) always overrides
+the config default — that's an explicit human action, not the "would an
+unattended process apply" question the config governs.
+
+**New config constants:** `WATCHLIST_SCHEDULE_HOUR_ET` (17),
+`WATCHLIST_SCHEDULE_MINUTE_ET` (30), `WATCHLIST_SCHEDULE_APPLY` (false),
+`WATCHLIST_SCHEDULE_STUCK_RUN_TIMEOUT_MINUTES` (60),
+`WATCHLIST_EXTRA_HOLIDAY_DATES` (empty).
+
+**CLI additions (`scripts/dry_run_evaluation.py`):**
+- `--schedule-check` — read-only: due-now?, next due time, concurrency
+  guard status, last successful scheduled run, current
+  `WATCHLIST_SCHEDULE_APPLY` value. Writes nothing.
+- `--scheduled-dry-run` — runs `run_scheduled_evaluation(apply=False)`;
+  only actually evaluates if due and not blocked.
+- `--scheduled-apply` — same, `apply=True`; refuses without `--yes`.
+
+**Manual safe-CLI validation (temp DB only):** `--schedule-check` against a
+fresh temp DB on the real "today" (2026-06-20, a Saturday) correctly
+reported `due now: False (2026-06-20 is a weekend)` and computed
+`next due (UTC): 2026-06-22 21:30:00` (Monday 17:30 ET). `--scheduled-dry-run`
+on the same DB correctly skipped with the same weekend reason and wrote no
+`evaluation_runs` row. `--scheduled-apply` without `--yes` correctly
+refused. Scheduled apply was **not** exercised against any real "due"
+window or the production DB this session (today is a weekend) — the "due"
+path is covered by the 35 mocked-time unit tests instead.
+
+**Revert command:**
+```
+git revert <commit-hash-of-this-entry>
+```
+Note: the `db/database.py` timestamp-override parameters default to the
+previous (wall-clock) behavior, and `run_watchlist_evaluation`'s new
+parameters default to the previous behavior too — both backward
+compatible. Reverting removes the scheduler module/CLI flags only.
+
+**Affects production behavior** | No — nothing calls
+`run_scheduled_evaluation()` automatically; `agent/core.py`/`main.py` are
+untouched. Only reachable via direct import or the new CLI flags.

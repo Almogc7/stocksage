@@ -562,3 +562,29 @@ MARKET_DATA_DATA_QUALITY_RETRY_HOURS: int = int(os.getenv("MARKET_DATA_DATA_QUAL
 WATCHLIST_PROVIDER_OUTAGE_THRESHOLD_PCT: float = float(
     os.getenv("WATCHLIST_PROVIDER_OUTAGE_THRESHOLD_PCT", "0.4")
 )
+
+# ─────────────────────────────────────────────
+#  Watchlist evaluation scheduler (Phase 6 — services/watchlist_scheduler.py)
+# ─────────────────────────────────────────────
+# Default daily evaluation time, America/New_York. 17:30 is safely after
+# both the regular 16:00 close and any early close (~13:00).
+WATCHLIST_SCHEDULE_HOUR_ET: int = int(os.getenv("WATCHLIST_SCHEDULE_HOUR_ET", "17"))
+WATCHLIST_SCHEDULE_MINUTE_ET: int = int(os.getenv("WATCHLIST_SCHEDULE_MINUTE_ET", "30"))
+
+# Automatic scheduled runs are dry-run unless this is explicitly true.
+# Has no effect on manual/CLI-forced apply calls (those are an explicit
+# human override regardless of this setting).
+WATCHLIST_SCHEDULE_APPLY: bool = os.getenv("WATCHLIST_SCHEDULE_APPLY", "false").lower() == "true"
+
+# Minutes after which a still-'started' evaluation run is treated as a
+# crashed/stuck process rather than a genuinely active one.
+WATCHLIST_SCHEDULE_STUCK_RUN_TIMEOUT_MINUTES: int = int(
+    os.getenv("WATCHLIST_SCHEDULE_STUCK_RUN_TIMEOUT_MINUTES", "60")
+)
+
+# Extra one-off US market closure dates not covered by the built-in
+# holiday approximation (e.g. an unscheduled closure), as comma-separated
+# ISO dates: "2026-01-09,2027-04-12". Empty by default.
+WATCHLIST_EXTRA_HOLIDAY_DATES: frozenset[str] = frozenset(
+    d.strip() for d in os.getenv("WATCHLIST_EXTRA_HOLIDAY_DATES", "").split(",") if d.strip()
+)
