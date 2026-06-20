@@ -932,13 +932,25 @@ def explain_symbol(symbol: str, *, client: MarketDataClient | None = None) -> di
         "opportunity" score from analyzers.technical.full_analysis()
       would_be_state, would_be_reason: hypothetical promotion/demotion
         decision using the symbol's CURRENT persisted counters — informational only
+
+    History window: uses a dedicated MarketDataClient(period="1y") by
+    default — NOT config.MARKET_DATA_HISTORY_PERIOD (6mo), which is too
+    short to compute EMA150/EMA200 (ta.trend.ema_indicator silently
+    returns NaN once a window exceeds the available row count). This
+    matches agent/core.py's live alert path, which has always fetched
+    get_historical(symbol, period="1y") via a different fetcher
+    (data/fetcher.py rather than data/market_data_validator.py) — same
+    lookback duration, different underlying mechanism. Changing this only
+    affects what explain_symbol() itself fetches; it does not change
+    config.MARKET_DATA_HISTORY_PERIOD or any other caller of
+    MarketDataClient (e.g. the real evaluator's liquidity lookback).
     """
     sym = symbol.upper()
     row = db.get_symbol_status(sym)
     if row is None:
         return {"symbol": sym, "found": False}
 
-    client = client or MarketDataClient()
+    client = client or MarketDataClient(period="1y")
     sec_type = row["security_type"] or classify_security_type(sym)
     market_result = client.validate(sym, security_type=sec_type)
 
@@ -1028,8 +1040,25 @@ def explain_symbol(symbol: str, *, client: MarketDataClient | None = None) -> di
             analysis = None
 
     if analysis is not None:
+        ema150_val = analysis["ema150"]
+        # NaN-safe: ema150_val != ema150_val is True only for NaN (no math
+        # import needed — same idiom as _safe_avg_volume above).
+        ema150_known = ema150_val is not None and ema150_val == ema150_val
+        # ema150_val itself may still be NaN below — never let a NaN reach
+        # the formatter as a "real" value (Telegram would print "nan").
+        display_ema150 = ema150_val if ema150_known else None
+
         vetoed = None
-        if not analysis["above_ema150"]:
+        if not ema150_known:
+            # full_analysis()'s own veto check is `current_price > ema150`,
+            # which is unconditionally False when ema150 is NaN (any
+            # comparison against NaN is False in Python) — so the SAME
+            # underlying score/verdict (0, NEUTRAL) results whether EMA150
+            # is genuinely below price or simply undefined for lack of
+            # history. This branch only fixes the human-readable LABEL for
+            # that second case; it does not change the score or verdict.
+            vetoed = "insufficient EMA150 data (need 150+ completed daily candles)"
+        elif not analysis["above_ema150"]:
             vetoed = "price below EMA150"
         elif analysis["rsi"] < 35:
             vetoed = f"RSI {analysis['rsi']} < 35 (oversold veto)"
@@ -1052,7 +1081,7 @@ def explain_symbol(symbol: str, *, client: MarketDataClient | None = None) -> di
                 "above_vwap": "above_vwap" in triggered,
             },
             "rsi": analysis["rsi"],
-            "ema150": analysis["ema150"],
+            "ema150": display_ema150,
             "ema200": analysis["ema200"],
         }
 

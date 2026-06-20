@@ -155,6 +155,118 @@ class TestExplainSymbolFunction(ExplainSymbolTestCase):
         self.assertIn("never directly to ACTIVE", out["would_be_reason"])
 
 
+def _make_short_history_client(n=126):
+    """A client whose history is too short for EMA150 (needs 150+ rows) --
+    reproduces the exact TSLA bug: ta.trend.ema_indicator returns NaN, and
+    `current_price > NaN` is unconditionally False in Python.
+
+    _FakeClient.get_history() always calls df_factory(n=252) explicitly,
+    so the factory below must ignore whatever n it's given and always
+    return the short dataframe."""
+    return _FakeClient(df_factory=lambda n=None: make_trending_df(n=126))
+
+
+class TestEmaVetoAccuracy(ExplainSymbolTestCase):
+    """
+    Regression tests for the EMA150/veto-label bug: insufficient history
+    must never be mislabeled as "price below EMA150", and NaN must never
+    reach a numeric field that a formatter would render as the string
+    "nan" instead of a clean N/A.
+    """
+
+    def test_insufficient_history_does_not_claim_price_below_ema150(self):
+        self._seed({"AI & Semiconductors": ["TSLA"]})
+        out = self.ev.explain_symbol("TSLA", client=_make_short_history_client())
+        self.assertNotEqual(out["opportunity"]["vetoed"], "price below EMA150")
+
+    def test_insufficient_history_produces_accurate_veto_message(self):
+        self._seed({"AI & Semiconductors": ["TSLA"]})
+        out = self.ev.explain_symbol("TSLA", client=_make_short_history_client())
+        self.assertIn("insufficient EMA150 data", out["opportunity"]["vetoed"])
+
+    def test_insufficient_history_ema150_is_none_not_nan(self):
+        self._seed({"AI & Semiconductors": ["TSLA"]})
+        out = self.ev.explain_symbol("TSLA", client=_make_short_history_client())
+        ema150 = out["opportunity"]["ema150"]
+        self.assertIsNone(ema150)  # never a NaN float that would format as "nan"
+
+    def test_explain_symbol_defaults_to_one_year_history_window(self):
+        """The primary fix: explain_symbol's own default client must request
+        enough history to compute EMA150/EMA200 for an ordinary symbol like
+        TSLA, instead of inheriting the 6-month default used elsewhere."""
+        self._seed({"AI & Semiconductors": ["TSLA"]})
+        captured = {}
+        orig_init = self.ev.MarketDataClient.__init__
+
+        def spy_init(self_client, *a, **kw):
+            captured["period"] = kw.get("period")
+            orig_init(self_client, *a, **kw)
+
+        with patch.object(self.ev.MarketDataClient, "__init__", spy_init):
+            try:
+                self.ev.explain_symbol("TSLA")
+            except Exception:
+                pass  # network call may fail in CI; we only care what period was requested
+        self.assertEqual(captured.get("period"), "1y")
+
+    def test_normal_symbol_with_enough_history_shows_real_ema_values(self):
+        self._seed({"AI & Semiconductors": ["TSLA"]})
+        out = self.ev.explain_symbol("TSLA", client=_FakeClient(df_factory=lambda n=252: make_trending_df(n=n)))
+        self.assertIsNotNone(out["opportunity"]["ema150"])
+        self.assertIsNotNone(out["opportunity"]["ema200"])
+        self.assertNotIn("insufficient", out["opportunity"]["vetoed"] or "")
+
+    def test_does_not_modify_watchlist_state(self):
+        self._seed({"AI & Semiconductors": ["TSLA"]})
+        before = self.db.get_symbol_status("TSLA")
+        self.ev.explain_symbol("TSLA", client=_make_short_history_client())
+        after = self.db.get_symbol_status("TSLA")
+        self.assertEqual(before, after)
+
+    def test_does_not_create_evaluation_run(self):
+        self._seed({"AI & Semiconductors": ["TSLA"]})
+        self.ev.explain_symbol("TSLA", client=_make_short_history_client())
+        self.assertIsNone(self.db.get_last_evaluation_run())
+
+
+class TestWatchlistStatusFormatterEmaDisplay(unittest.TestCase):
+    """Telegram-formatter-level checks: a None EMA150/200 must render as
+    "N/A", never as the literal string "nan"."""
+
+    def setUp(self):
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        f.close()
+        self.db = _reload_db(f.name)
+        self.db.init_db({"AI & Semiconductors": ["TSLA"]})
+        self.db.run_initial_classification({"AI & Semiconductors": ["TSLA"]})
+        import bot.telegram_bot as bot_mod
+        importlib.reload(bot_mod)
+        self.bot = bot_mod
+        self._auth_patch = patch.object(self.bot, "AUTHORIZED_CHAT_IDS", frozenset([AUTH_ID]))
+        self._auth_patch.start()
+
+    def tearDown(self):
+        self._auth_patch.stop()
+
+    def test_missing_ema150_renders_as_na_not_nan(self):
+        update = _make_update()
+        with patch("services.watchlist_evaluator.MarketDataClient", return_value=_make_short_history_client()):
+            _run(self.bot.cmd_watchlist_status(update, _make_context(["TSLA"])))
+        text = update.message.reply_text.call_args_list[0].args[0]
+        self.assertNotIn("nan", text.lower())
+        self.assertIn("N/A", text)
+        self.assertIn("insufficient EMA150 data", text)
+
+    def test_normal_symbol_shows_formatted_numeric_ema150(self):
+        update = _make_update()
+        with patch("services.watchlist_evaluator.MarketDataClient",
+                    return_value=_FakeClient(df_factory=lambda n=252: make_trending_df(n=n))):
+            _run(self.bot.cmd_watchlist_status(update, _make_context(["TSLA"])))
+        text = update.message.reply_text.call_args_list[0].args[0]
+        self.assertNotIn("nan", text.lower())
+        self.assertRegex(text, r"EMA150: [\d,]+\.\d\d")
+
+
 class TestWatchlistStatusCommand(unittest.TestCase):
 
     def setUp(self):

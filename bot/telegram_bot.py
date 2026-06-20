@@ -940,11 +940,12 @@ def _format_watchlist_status(symbol: str, status: dict, explanation: dict | None
             lines += ["", "Live opportunity score unavailable (indicator calculation failed)."]
         else:
             fired = [_OPPORTUNITY_SIGNAL_LABELS[k] for k, v in opp["signals"].items() if v and k in _OPPORTUNITY_SIGNAL_LABELS]
+            ema150_str = f"{opp['ema150']:,.2f}" if opp["ema150"] is not None else "N/A (needs 150+ days history)"
             ema200_str = f"{opp['ema200']:,.2f}" if opp["ema200"] is not None else "N/A (needs 200+ days history)"
             lines += [
                 "",
                 f"Live opportunity score: {opp['score']}/100 — {opp['verdict']}",
-                f"  RSI: {opp['rsi']}   EMA150: {opp['ema150']:,.2f}   EMA200: {ema200_str}",
+                f"  RSI: {opp['rsi']}   EMA150: {ema150_str}   EMA200: {ema200_str}",
                 f"  Signals fired: {', '.join(fired) if fired else 'none'}",
                 f"  Veto: {opp['vetoed'] or 'none'}",
             ]
