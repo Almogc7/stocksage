@@ -305,3 +305,75 @@ original bug) but will not lose data.
 state (manual or future eligibility-engine promotions/demotions, scores,
 counters) will now survive application restarts instead of being reset to
 the hardcoded 30-symbol seed list every time.
+
+## Entry 17 — Feat: add watchlist evaluation run tracking (Phase 2)
+
+| Field | Value |
+|---|---|
+| **Commit** | (pending — see `git log` after commit) |
+| **Files changed** | `db/database.py`, `tests/test_evaluation_runs.py` (new), `CLAUDE_CHANGES.md` |
+| **New test count** | 179 total (23 new) — all pass |
+
+Pure bookkeeping infrastructure for future watchlist eligibility refresh runs.
+No live yfinance evaluation, no promotion/demotion wiring, no scheduler, no
+Telegram commands — those are later phases. This phase never reads market
+data and never modifies the `watchlist` table.
+
+**Schema (v4 migration, idempotent — `CREATE TABLE IF NOT EXISTS`):**
+- New table `evaluation_runs`: `run_id`, `run_type` (manual/scheduled/dry_run/startup),
+  `status` (started/success/failed/partial_failure/cancelled), `started_at`,
+  `completed_at`, `duration_seconds`, per-tier before/after counts
+  (`active_before/after`, `monitor_before/after`, `context_count`,
+  `ineligible_before/after`, `user_removed_count`), run outcome counts
+  (`promotions_count`, `demotions_count`, `recovered_count`,
+  `newly_ineligible_count`), provider/data-quality counts
+  (`provider_error_count`, `stale_data_count`, `invalid_symbol_count`,
+  `cache_hits`, `cache_misses`, `yfinance_request_count`), `dry_run` flag,
+  `triggered_by`, `error_summary`, `metadata_json`.
+- Index on `(status, started_at)` for fast last-run/in-progress lookups.
+- Timestamps use the same UTC space-separated format as the rest of the
+  codebase (`YYYY-MM-DD HH:MM:SS`, not ISO `T`-separated) so future
+  `datetime('now','utc',...)` comparisons stay consistent with `log_alert()`.
+
+**Helper functions added (`db/database.py`):**
+- `create_evaluation_run(run_type, *, dry_run=False, triggered_by=None, metadata=None, **counts)` → run_id
+- `update_evaluation_run_success(run_id, **counts)`
+- `update_evaluation_run_failure(run_id, error_summary, **counts)`
+- `update_evaluation_run_partial_failure(run_id, error_summary, **counts)`
+- `cancel_evaluation_run(run_id, reason="")`
+- `record_evaluation_run_counts(run_id, **counts)` — incremental update without finalizing
+- `get_evaluation_run(run_id)`, `get_last_evaluation_run()`,
+  `get_last_successful_evaluation_run()`, `list_recent_evaluation_runs(limit=10)`,
+  `get_in_progress_evaluation_run()` (returns the latest `started` row, if any;
+  no locking — a later phase decides staleness from `started_at` age)
+
+All count-column writes go through an explicit allowlist
+(`_EVAL_RUN_COUNT_COLUMNS`) so `**counts`/`**kwargs` can't silently write to
+`status`/`started_at`/etc.; unknown keys raise `ValueError`.
+
+**Verified:**
+- Migration creates the table and is idempotent (calling `migrate_db()`
+  twice does not duplicate it).
+- started → success / failed / partial_failure / cancelled transitions all
+  stamp `completed_at` and compute `duration_seconds`.
+- `get_last_successful_evaluation_run()` correctly skips failed runs.
+- `list_recent_evaluation_runs()` orders newest-first and respects `limit`.
+- `dry_run` flag and `metadata_json` (dict round-trip via JSON) stored correctly.
+- `get_in_progress_evaluation_run()` detects a `started` run and stops
+  detecting it once finalized.
+- Existing watchlist rows are provably unchanged before/after creating and
+  finalizing runs (`get_symbol_status()` snapshot compared byte-for-byte).
+- Ran against the real production DB via `test_fetch.py` (smoke test):
+  `evaluation_runs` table created with 0 rows, all 80 existing watchlist
+  rows kept their current `wl_state`/`wl_classified` values unchanged.
+
+**Revert command:**
+```
+git revert <commit-hash-of-this-entry>
+```
+Note: this only adds a new table and an index; it does not touch any
+existing table, so reverting (or never adopting it) is safe without a DB
+reset.
+
+**Affects production behavior** | No — purely additive bookkeeping table,
+nothing yet calls these functions outside of tests.

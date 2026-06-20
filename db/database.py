@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from collections import defaultdict
 from datetime import date, datetime, timezone
@@ -16,6 +17,12 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _utc_now_str() -> str:
+    # Space separator (not "T") so SQLite's datetime('now', 'utc', ...) string
+    # comparisons sort correctly against these timestamps. See log_alert().
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def init_db(watchlist: dict | None = None) -> None:
@@ -79,6 +86,10 @@ def migrate_db() -> None:
 
     New table in v2:
       symbol_categories — many-to-many symbol ↔ category mapping
+
+    New table in v4:
+      evaluation_runs — bookkeeping for watchlist eligibility refresh runs
+      (manual/scheduled/dry_run/startup). Never modifies the watchlist table.
     """
     with _connect() as conn:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()}
@@ -123,6 +134,51 @@ def migrate_db() -> None:
             # current, possibly dynamically-promoted/demoted, wl_state back to
             # the hardcoded seed rules.
             conn.execute("UPDATE watchlist SET wl_classified = 1")
+
+        # v4 table — evaluation run tracking (Phase 2 of the dynamic watchlist
+        # lifecycle). Pure bookkeeping; never modifies watchlist rows itself.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS evaluation_runs (
+                run_id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_type                 TEXT NOT NULL
+                                          CHECK(run_type IN ('manual', 'scheduled', 'dry_run', 'startup')),
+                status                   TEXT NOT NULL DEFAULT 'started'
+                                          CHECK(status IN ('started', 'success', 'failed', 'partial_failure', 'cancelled')),
+                started_at               TIMESTAMP NOT NULL,
+                completed_at             TIMESTAMP DEFAULT NULL,
+                duration_seconds         REAL DEFAULT NULL,
+                total_symbols_considered INTEGER DEFAULT 0,
+                total_symbols_evaluated  INTEGER DEFAULT 0,
+                total_symbols_skipped    INTEGER DEFAULT 0,
+                total_symbols_failed     INTEGER DEFAULT 0,
+                active_before            INTEGER DEFAULT NULL,
+                active_after             INTEGER DEFAULT NULL,
+                monitor_before           INTEGER DEFAULT NULL,
+                monitor_after            INTEGER DEFAULT NULL,
+                context_count            INTEGER DEFAULT NULL,
+                ineligible_before        INTEGER DEFAULT NULL,
+                ineligible_after         INTEGER DEFAULT NULL,
+                user_removed_count       INTEGER DEFAULT NULL,
+                promotions_count         INTEGER DEFAULT 0,
+                demotions_count          INTEGER DEFAULT 0,
+                recovered_count          INTEGER DEFAULT 0,
+                newly_ineligible_count   INTEGER DEFAULT 0,
+                provider_error_count     INTEGER DEFAULT 0,
+                stale_data_count         INTEGER DEFAULT 0,
+                invalid_symbol_count     INTEGER DEFAULT 0,
+                cache_hits               INTEGER DEFAULT 0,
+                cache_misses             INTEGER DEFAULT 0,
+                yfinance_request_count   INTEGER DEFAULT 0,
+                dry_run                  INTEGER NOT NULL DEFAULT 0,
+                triggered_by             TEXT DEFAULT NULL,
+                error_summary            TEXT DEFAULT NULL,
+                metadata_json            TEXT DEFAULT NULL
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_evaluation_runs_status_started"
+            " ON evaluation_runs(status, started_at)"
+        )
 
         # v2 table
         conn.execute("""
@@ -709,3 +765,210 @@ def get_today_alerts() -> list[dict]:
             (today,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+# ── Evaluation runs (watchlist eligibility refresh bookkeeping) ──────────────
+#
+# Phase 2 of the dynamic watchlist lifecycle. These functions only record
+# what a refresh run did; they never read live market data and never modify
+# the `watchlist` table. Live evaluation, promotion/demotion wiring, and the
+# scheduler are later phases.
+
+# Columns that record_evaluation_run_counts()/update_evaluation_run_success()/
+# update_evaluation_run_failure() are allowed to write via **counts. Keeps
+# run_type/status/started_at/completed_at/duration_seconds/dry_run/
+# triggered_by/error_summary/metadata_json on their own explicit, validated
+# code paths instead of being silently overwritable via **kwargs.
+_EVAL_RUN_COUNT_COLUMNS: frozenset[str] = frozenset({
+    "total_symbols_considered", "total_symbols_evaluated",
+    "total_symbols_skipped", "total_symbols_failed",
+    "active_before", "active_after", "monitor_before", "monitor_after",
+    "context_count", "ineligible_before", "ineligible_after",
+    "user_removed_count", "promotions_count", "demotions_count",
+    "recovered_count", "newly_ineligible_count", "provider_error_count",
+    "stale_data_count", "invalid_symbol_count", "cache_hits", "cache_misses",
+    "yfinance_request_count",
+})
+
+
+def _row_to_run_dict(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    raw = d.get("metadata_json")
+    if raw:
+        try:
+            d["metadata_json"] = json.loads(raw)
+        except (TypeError, ValueError):
+            d["metadata_json"] = None
+    return d
+
+
+def create_evaluation_run(
+    run_type: str,
+    *,
+    dry_run: bool = False,
+    triggered_by: str | None = None,
+    metadata: dict | None = None,
+    **counts,
+) -> int:
+    """
+    Insert a new evaluation run with status='started'. Returns its run_id.
+
+    run_type must be one of: manual, scheduled, dry_run, startup.
+    Any of the columns in _EVAL_RUN_COUNT_COLUMNS may be passed as initial
+    values via **counts (e.g. total_symbols_considered=326).
+    """
+    cols = ["run_type", "status", "started_at", "dry_run", "triggered_by", "metadata_json"]
+    params: list = [
+        run_type, "started", _utc_now_str(), 1 if dry_run else 0, triggered_by,
+        json.dumps(metadata) if metadata is not None else None,
+    ]
+    for key, value in counts.items():
+        if key not in _EVAL_RUN_COUNT_COLUMNS:
+            raise ValueError(f"Unknown evaluation run column: {key!r}")
+        cols.append(key)
+        params.append(value)
+
+    placeholders = ", ".join("?" for _ in cols)
+    with _connect() as conn:
+        cur = conn.execute(
+            f"INSERT INTO evaluation_runs ({', '.join(cols)}) VALUES ({placeholders})",
+            params,
+        )
+        return cur.lastrowid
+
+
+def _finalize_evaluation_run(
+    run_id: int,
+    status: str,
+    *,
+    error_summary: str | None = None,
+    metadata: dict | None = None,
+    **counts,
+) -> None:
+    completed_at = _utc_now_str()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT started_at FROM evaluation_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No evaluation run with id {run_id}")
+
+        started = datetime.strptime(row["started_at"], "%Y-%m-%d %H:%M:%S")
+        completed = datetime.strptime(completed_at, "%Y-%m-%d %H:%M:%S")
+        duration_seconds = (completed - started).total_seconds()
+
+        set_clauses = ["status = ?", "completed_at = ?", "duration_seconds = ?", "error_summary = ?"]
+        params: list = [status, completed_at, duration_seconds, error_summary]
+
+        if metadata is not None:
+            set_clauses.append("metadata_json = ?")
+            params.append(json.dumps(metadata))
+
+        for key, value in counts.items():
+            if key not in _EVAL_RUN_COUNT_COLUMNS:
+                raise ValueError(f"Unknown evaluation run column: {key!r}")
+            set_clauses.append(f"{key} = ?")
+            params.append(value)
+
+        params.append(run_id)
+        conn.execute(
+            f"UPDATE evaluation_runs SET {', '.join(set_clauses)} WHERE run_id = ?",
+            params,
+        )
+
+
+def update_evaluation_run_success(run_id: int, **kwargs) -> None:
+    """Mark a run 'success' and stamp completed_at/duration_seconds."""
+    _finalize_evaluation_run(run_id, "success", **kwargs)
+
+
+def update_evaluation_run_failure(run_id: int, error_summary: str, **kwargs) -> None:
+    """Mark a run 'failed' with a short, secret-free error_summary."""
+    _finalize_evaluation_run(run_id, "failed", error_summary=error_summary, **kwargs)
+
+
+def update_evaluation_run_partial_failure(run_id: int, error_summary: str, **kwargs) -> None:
+    """Mark a run 'partial_failure' (e.g. some symbols failed, ACTIVE list still valid)."""
+    _finalize_evaluation_run(run_id, "partial_failure", error_summary=error_summary, **kwargs)
+
+
+def cancel_evaluation_run(run_id: int, reason: str = "") -> None:
+    """Mark a run 'cancelled' (e.g. superseded or aborted before completion)."""
+    _finalize_evaluation_run(run_id, "cancelled", error_summary=reason or None)
+
+
+def record_evaluation_run_counts(run_id: int, **counts) -> None:
+    """
+    Update count columns mid-run without touching status/timestamps.
+    Lets a future evaluator report incremental progress (e.g. provider error
+    counts as they occur) before the run is finalized.
+    """
+    if not counts:
+        return
+    set_clauses = []
+    params: list = []
+    for key, value in counts.items():
+        if key not in _EVAL_RUN_COUNT_COLUMNS:
+            raise ValueError(f"Unknown evaluation run column: {key!r}")
+        set_clauses.append(f"{key} = ?")
+        params.append(value)
+    params.append(run_id)
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE evaluation_runs SET {', '.join(set_clauses)} WHERE run_id = ?",
+            params,
+        )
+
+
+def get_evaluation_run(run_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM evaluation_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+    return _row_to_run_dict(row) if row else None
+
+
+def get_last_evaluation_run() -> dict | None:
+    """Most recent run regardless of status, or None if no run has ever been recorded."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM evaluation_runs ORDER BY started_at DESC, run_id DESC LIMIT 1"
+        ).fetchone()
+    return _row_to_run_dict(row) if row else None
+
+
+def get_last_successful_evaluation_run() -> dict | None:
+    """Most recent run with status='success', ignoring failed/partial/cancelled runs."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM evaluation_runs WHERE status = 'success'"
+            " ORDER BY started_at DESC, run_id DESC LIMIT 1"
+        ).fetchone()
+    return _row_to_run_dict(row) if row else None
+
+
+def list_recent_evaluation_runs(limit: int = 10) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM evaluation_runs ORDER BY started_at DESC, run_id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [_row_to_run_dict(row) for row in rows]
+
+
+def get_in_progress_evaluation_run() -> dict | None:
+    """
+    Return the most recent run still in 'started' status, if any.
+
+    A crashed process can leave a run stuck in 'started' forever. This
+    helper only reports the row; it is up to the caller (a later phase) to
+    decide — based on started_at age — whether it represents a genuinely
+    active refresh (deny a concurrent one) or a stale leftover (safe to
+    treat as not blocking). No locking is implemented here.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM evaluation_runs WHERE status = 'started'"
+            " ORDER BY started_at DESC, run_id DESC LIMIT 1"
+        ).fetchone()
+    return _row_to_run_dict(row) if row else None
