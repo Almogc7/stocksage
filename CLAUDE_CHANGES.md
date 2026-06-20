@@ -243,3 +243,65 @@ Note: DB schema changes require manual column removal or DB reset if reverting.
 | **Contents** | 19-section design document covering: Phase 1 verification, current watchlist implementation analysis, symbol classification, multi-level watchlist architecture, eligibility rules, relevance score, promotion/demotion hysteresis, scan schedule, alert lifecycle, example messages, database schema proposal, git-safety design, API performance estimates, test plan, and 20 decisions requiring explicit approval. No production code changed. |
 | **Symbol counts found** | 404 config.py entries, 399 unique, 80 in DB (original seed from 2026-05-16), 5 duplicates |
 | **Critical finding** | Removed symbols re-appear after restart because `populate_from_config()` uses `INSERT OR IGNORE` without checking a removed-symbols exclusion list |
+
+## Entry 16 — Fix: startup classification no longer overwrites dynamic watchlist state
+
+| Field | Value |
+|---|---|
+| **Commit** | (pending — see `git log` after commit) |
+| **Files changed** | `db/database.py`, `tests/test_watchlist_states.py` |
+| **New test count** | 156 total (6 new) — all pass |
+
+**Audit finding:** `run_initial_classification()` ran unconditionally on every
+application startup (`run_bot()` → `init_db()` → `run_initial_classification()`)
+and unconditionally rewrote every row's `wl_state` based only on a hardcoded
+30-symbol `INITIAL_ACTIVE_SET`, a hardcoded ineligible-symbol dict, and
+`classify_security_type()`. It never checked the row's existing `wl_state`.
+This meant any dynamic promotion/demotion performed by the eligibility engine
+(not yet wired into a live schedule, but exercised manually or by future
+code) would be silently discarded on the next restart — ACTIVE symbols not
+in the hardcoded seed list would revert to MONITOR, and the hardcoded seed
+symbols would always be forced back to ACTIVE regardless of current state.
+
+**Fix:**
+- Added a new `wl_classified` column (v3 migration, idempotent `ALTER TABLE`).
+  Rows that already existed when the column is added are backfilled to
+  `wl_classified = 1` in the same migration step, so upgrading a live
+  production DB does not re-run the hardcoded classifier over real,
+  dynamically-managed state.
+- `run_initial_classification()` now only selects and classifies rows where
+  `wl_classified = 0`, and sets `wl_classified = 1` on every branch
+  (USER_REMOVED, TEMPORARILY_INELIGIBLE, ETF_INDEX_CONTEXT, ACTIVE, MONITOR).
+  Already-classified rows are left completely untouched on subsequent calls.
+- `add_to_watchlist()` and `remove_from_watchlist()` now also set
+  `wl_classified = 1`, since both are explicit, intentional state changes
+  that should not be immediately re-evaluated by the hardcoded seed rules on
+  the next restart.
+
+**Verified:**
+- A MONITOR symbol manually promoted to ACTIVE survives a simulated restart.
+- A hardcoded-seed ACTIVE symbol manually demoted to MONITOR survives a
+  simulated restart (does not get forced back to ACTIVE).
+- `relevance_score` and hysteresis counters (`consec_promote_count`) survive
+  a simulated restart.
+- Calling `run_initial_classification()` twice in a row is a no-op for
+  already-classified symbols.
+- A symbol newly added to `config.py` after go-live still gets classified
+  on the next startup, without disturbing already-classified rows.
+- Upgrading a pre-`wl_classified` database (simulated via a hand-built v2
+  schema row) backfills `wl_classified = 1` and preserves the existing
+  `ACTIVE` state instead of resetting it.
+
+**Revert command:**
+```
+git revert <commit-hash-of-this-entry>
+```
+Note: this only adds a column and changes write-guards; it does not remove
+or rename any existing column, so reverting is safe without a DB reset. A
+reverted DB will resume overwriting dynamic state on every restart (the
+original bug) but will not lose data.
+
+**Affects production behavior** | Yes — once deployed, dynamic watchlist
+state (manual or future eligibility-engine promotions/demotions, scores,
+counters) will now survive application restarts instead of being reset to
+the hardcoded 30-symbol seed list every time.

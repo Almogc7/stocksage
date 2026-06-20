@@ -127,6 +127,127 @@ class TestStatePersistence(unittest.TestCase):
         status = db.get_symbol_status('NVDA')
         self.assertEqual(status['wl_state'], 'USER_REMOVED')
 
+    def test_restart_does_not_reset_promoted_symbol_to_monitor(self):
+        """A MONITOR symbol dynamically promoted to ACTIVE must survive a restart."""
+        path = self._tmp()
+        db = _reload_db(path)
+        wl = {'AI & Semiconductors': ['CRM']}  # not in INITIAL_ACTIVE_SET
+        db.init_db(wl)
+        db.run_initial_classification(wl)
+        self.assertEqual(db.get_symbol_status('CRM')['wl_state'], 'MONITOR')
+
+        db.update_symbol_state('CRM', 'ACTIVE')
+
+        db2 = _reload_db(path)
+        db2.init_db(wl)
+        db2.run_initial_classification(wl)
+        self.assertEqual(db2.get_symbol_status('CRM')['wl_state'], 'ACTIVE')
+
+    def test_restart_does_not_reset_demoted_seed_symbol_to_active(self):
+        """A hardcoded-seed ACTIVE symbol dynamically demoted must stay demoted on restart."""
+        path = self._tmp()
+        db = _reload_db(path)
+        wl = {'AI & Semiconductors': ['NVDA']}  # in INITIAL_ACTIVE_SET
+        db.init_db(wl)
+        db.run_initial_classification(wl)
+        self.assertEqual(db.get_symbol_status('NVDA')['wl_state'], 'ACTIVE')
+
+        db.update_symbol_state('NVDA', 'MONITOR')
+
+        db2 = _reload_db(path)
+        db2.init_db(wl)
+        db2.run_initial_classification(wl)
+        self.assertEqual(db2.get_symbol_status('NVDA')['wl_state'], 'MONITOR')
+
+    def test_restart_preserves_scores_and_hysteresis_counters(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        wl = {'AI & Semiconductors': ['NVDA']}
+        db.init_db(wl)
+        db.run_initial_classification(wl)
+        db.update_eligibility('NVDA', score=77, security_type='stock', state='ACTIVE')
+        db.update_hysteresis('NVDA', promote_delta=1, demote_delta=0)
+
+        db2 = _reload_db(path)
+        db2.init_db(wl)
+        db2.run_initial_classification(wl)
+        status = db2.get_symbol_status('NVDA')
+        self.assertEqual(status['relevance_score'], 77)
+        self.assertEqual(status['consec_promote_count'], 1)
+
+    def test_run_initial_classification_is_idempotent_per_symbol(self):
+        """Calling it twice in a row must not re-flip a symbol back to its seed state."""
+        path = self._tmp()
+        db = _reload_db(path)
+        wl = {'AI & Semiconductors': ['CRM']}
+        db.init_db(wl)
+        db.run_initial_classification(wl)
+        db.update_symbol_state('CRM', 'ACTIVE')
+
+        db.run_initial_classification(wl)
+        self.assertEqual(db.get_symbol_status('CRM')['wl_state'], 'ACTIVE')
+
+    def test_new_symbol_added_to_config_gets_classified_without_disturbing_others(self):
+        """A symbol newly added to config.py after go-live gets classified; existing rows untouched."""
+        path = self._tmp()
+        db = _reload_db(path)
+        wl = {'AI & Semiconductors': ['CRM']}
+        db.init_db(wl)
+        db.run_initial_classification(wl)
+        db.update_symbol_state('CRM', 'ACTIVE')
+
+        wl2 = {'AI & Semiconductors': ['CRM'], 'ETFs': ['SPY']}
+        db.populate_from_config(wl2)
+        db.run_initial_classification(wl2)
+
+        self.assertEqual(db.get_symbol_status('CRM')['wl_state'], 'ACTIVE')
+        self.assertEqual(db.get_symbol_status('SPY')['wl_state'], 'ETF_INDEX_CONTEXT')
+
+    def test_db_upgrade_backfills_classified_without_reclassifying(self):
+        """Simulates upgrading a real DB that predates wl_classified: a row with
+        a dynamically-promoted ACTIVE state, built on the v2 schema (no
+        wl_classified column yet), must keep its ACTIVE state — not be reset
+        to MONITOR by the hardcoded seed rules — once migrate_db() adds the
+        column and backfills it."""
+        import sqlite3
+        path = self._tmp()
+
+        conn = sqlite3.connect(path)
+        conn.execute("""
+            CREATE TABLE watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL UNIQUE,
+                category TEXT NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                removed_at TIMESTAMP DEFAULT NULL,
+                wl_state TEXT NOT NULL DEFAULT 'MONITOR',
+                security_type TEXT DEFAULT 'stock',
+                relevance_score INTEGER DEFAULT NULL,
+                last_evaluated TIMESTAMP DEFAULT NULL,
+                last_promoted TIMESTAMP DEFAULT NULL,
+                last_demoted TIMESTAMP DEFAULT NULL,
+                exclusion_reason TEXT DEFAULT NULL,
+                reeval_date DATE DEFAULT NULL,
+                consec_promote_count INTEGER DEFAULT 0,
+                consec_demote_count INTEGER DEFAULT 0,
+                dwell_days INTEGER DEFAULT 0,
+                source TEXT DEFAULT 'config'
+            )
+        """)
+        conn.execute(
+            "INSERT INTO watchlist (symbol, category, wl_state) VALUES ('CRM', 'AI & Semiconductors', 'ACTIVE')"
+        )
+        conn.commit()
+        conn.close()
+
+        db = _reload_db(path)
+        db.init_db({'AI & Semiconductors': ['CRM']})
+
+        status = db.get_symbol_status('CRM')
+        self.assertEqual(status['wl_classified'], 1)
+        self.assertEqual(status['wl_state'], 'ACTIVE')
+
     def test_increment_dwell_days(self):
         path = self._tmp()
         db = _reload_db(path)

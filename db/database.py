@@ -71,6 +71,12 @@ def migrate_db() -> None:
       last_promoted, last_demoted, exclusion_reason, reeval_date,
       consec_promote_count, consec_demote_count, dwell_days, source
 
+    Column added in v3:
+      wl_classified — 1 once run_initial_classification() has assigned a
+      symbol's starting state. Rows that already exist when this column is
+      added are backfilled to 1 so an upgrade does not re-run the hardcoded
+      classifier over live, dynamically-managed state.
+
     New table in v2:
       symbol_categories — many-to-many symbol ↔ category mapping
     """
@@ -105,6 +111,18 @@ def migrate_db() -> None:
         for col_name, col_def in v2_cols:
             if col_name not in existing:
                 conn.execute(f"ALTER TABLE watchlist ADD COLUMN {col_name} {col_def}")
+
+        # v3 column
+        if "wl_classified" not in existing:
+            conn.execute(
+                "ALTER TABLE watchlist ADD COLUMN wl_classified INTEGER NOT NULL DEFAULT 0"
+            )
+            # Rows that already existed before this column was introduced have
+            # already been through (likely several) prior classification runs.
+            # Mark them classified now so the next startup does not reset their
+            # current, possibly dynamically-promoted/demoted, wl_state back to
+            # the hardcoded seed rules.
+            conn.execute("UPDATE watchlist SET wl_classified = 1")
 
         # v2 table
         conn.execute("""
@@ -166,12 +184,14 @@ def add_to_watchlist(symbol: str, category: str) -> None:
     sym = symbol.upper()
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO watchlist (symbol, category, enabled, wl_state) VALUES (?, ?, 1, 'MONITOR')"
+            "INSERT INTO watchlist (symbol, category, enabled, wl_state, wl_classified)"
+            " VALUES (?, ?, 1, 'MONITOR', 1)"
             " ON CONFLICT(symbol) DO UPDATE SET"
             "   enabled = 1,"
             "   category = excluded.category,"
             "   removed_at = NULL,"
-            "   wl_state = 'MONITOR'",
+            "   wl_state = 'MONITOR',"
+            "   wl_classified = 1",
             (sym, category),
         )
         conn.execute(
@@ -216,8 +236,8 @@ def remove_from_watchlist(symbol: str) -> None:
     """
     with _connect() as conn:
         conn.execute(
-            "UPDATE watchlist SET enabled = 0, removed_at = ?, wl_state = 'USER_REMOVED'"
-            " WHERE symbol = ?",
+            "UPDATE watchlist SET enabled = 0, removed_at = ?, wl_state = 'USER_REMOVED',"
+            " wl_classified = 1 WHERE symbol = ?",
             (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), symbol.upper()),
         )
 
@@ -419,7 +439,15 @@ def run_initial_classification(watchlist_config: dict) -> dict:
     Assign initial wl_state values using config data and known symbol lists.
     No API calls — uses only data already in the DB.
 
-    Rules (in order):
+    Only processes rows where wl_classified = 0, i.e. symbols that have never
+    been through this classifier before (a brand-new DB, or a symbol newly
+    seeded by populate_from_config()/add_to_watchlist() since the last run).
+    Already-classified rows are left untouched so that dynamic state set by
+    the eligibility engine (ACTIVE/MONITOR promotion-demotion, hysteresis
+    counters, scores, USER_REMOVED, TEMPORARILY_INELIGIBLE reasons) survives
+    an application restart.
+
+    Rules (in order), applied once per symbol:
     1. enabled=0 → USER_REMOVED (already set by migrate_db/remove_from_watchlist)
     2. Invalid/foreign symbols → TEMPORARILY_INELIGIBLE with reason
     3. ETF/index/crypto symbols → ETF_INDEX_CONTEXT
@@ -427,7 +455,8 @@ def run_initial_classification(watchlist_config: dict) -> dict:
     5. Everything else → MONITOR
 
     Also reclassifies CCC from cloud/software to financials.
-    Returns a summary dict: symbol → assigned_state.
+    Returns a summary dict: symbol → assigned_state (only for symbols
+    classified during this call; already-classified symbols are omitted).
     """
     from analyzers.eligibility import classify_security_type
 
@@ -455,7 +484,9 @@ def run_initial_classification(watchlist_config: dict) -> dict:
     }
 
     with _connect() as conn:
-        rows = conn.execute("SELECT symbol, enabled FROM watchlist").fetchall()
+        rows = conn.execute(
+            "SELECT symbol, enabled FROM watchlist WHERE wl_classified = 0"
+        ).fetchall()
 
     summary: dict[str, str] = {}
 
@@ -464,6 +495,12 @@ def run_initial_classification(watchlist_config: dict) -> dict:
         enabled: int = row["enabled"]
 
         if not enabled:
+            with _connect() as conn:
+                conn.execute(
+                    "UPDATE watchlist SET wl_state = 'USER_REMOVED', wl_classified = 1"
+                    " WHERE symbol = ?",
+                    (symbol,),
+                )
             summary[symbol] = "USER_REMOVED"
             continue
 
@@ -486,7 +523,7 @@ def run_initial_classification(watchlist_config: dict) -> dict:
             with _connect() as conn:
                 conn.execute(
                     "UPDATE watchlist SET wl_state = 'TEMPORARILY_INELIGIBLE',"
-                    " exclusion_reason = ? WHERE symbol = ?",
+                    " exclusion_reason = ?, wl_classified = 1 WHERE symbol = ?",
                     (reason, symbol),
                 )
             summary[symbol] = "TEMPORARILY_INELIGIBLE"
@@ -497,7 +534,7 @@ def run_initial_classification(watchlist_config: dict) -> dict:
             with _connect() as conn:
                 conn.execute(
                     "UPDATE watchlist SET wl_state = 'ETF_INDEX_CONTEXT',"
-                    " security_type = ? WHERE symbol = ?",
+                    " security_type = ?, wl_classified = 1 WHERE symbol = ?",
                     (sec_type, symbol),
                 )
             summary[symbol] = "ETF_INDEX_CONTEXT"
@@ -506,16 +543,16 @@ def run_initial_classification(watchlist_config: dict) -> dict:
         if symbol in INITIAL_ACTIVE_SET:
             with _connect() as conn:
                 conn.execute(
-                    "UPDATE watchlist SET wl_state = 'ACTIVE', security_type = 'stock'"
-                    " WHERE symbol = ?",
+                    "UPDATE watchlist SET wl_state = 'ACTIVE', security_type = 'stock',"
+                    " wl_classified = 1 WHERE symbol = ?",
                     (symbol,),
                 )
             summary[symbol] = "ACTIVE"
         else:
             with _connect() as conn:
                 conn.execute(
-                    "UPDATE watchlist SET wl_state = 'MONITOR', security_type = 'stock'"
-                    " WHERE symbol = ?",
+                    "UPDATE watchlist SET wl_state = 'MONITOR', security_type = 'stock',"
+                    " wl_classified = 1 WHERE symbol = ?",
                     (symbol,),
                 )
             summary[symbol] = "MONITOR"
