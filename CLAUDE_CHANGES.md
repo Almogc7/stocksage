@@ -487,3 +487,104 @@ any existing function used by other code, so reverting is safe.
 **Affects production behavior** | No — nothing in `bot/telegram_bot.py` or
 `agent/core.py` calls this module yet. It is unused until Phase 4 wires it
 into a live daily evaluator.
+
+## Entry 19 — Feat: add dry-run watchlist evaluator (Phase 4)
+
+| Field | Value |
+|---|---|
+| **Commit** | (pending — see `git log` after commit) |
+| **Files changed** | `services/watchlist_evaluator.py` (new), `services/__init__.py` (new), `scripts/dry_run_evaluation.py` (new), `db/database.py` (read-only `get_unclassified_symbols()`), `config.py`, `tests/test_watchlist_evaluator.py` (new), `CLAUDE_CHANGES.md` |
+| **New test count** | 240 total (28 new) — all pass |
+
+Connects SQLite watchlist state + evaluation_runs tracking (Phase 2) +
+MarketDataClient (Phase 3) + the existing eligibility/hysteresis engine
+into one dry-run evaluation pass. **No watchlist row is ever written by
+this phase** — every change is computed and reported as "proposed" only.
+The only database write performed is one `evaluation_runs` row per run
+(dry_run=True), which was always the documented Phase 2 design.
+
+**What dry-run means here:** the evaluator reads current state, fetches
+live (or mocked) market data, computes what relevance score and what
+state transition *would* happen under the existing hysteresis rules, and
+returns a `DryRunEvaluationResult` with the full proposed picture —
+proposed ACTIVE/MONITOR/TEMPORARILY_INELIGIBLE counts, per-symbol
+promotions/demotions/recoveries/ineligible-transitions, and warnings. It
+never calls `update_symbol_state`/`update_eligibility`/`update_hysteresis`.
+Phase 5 will take this same `DryRunEvaluationResult` and apply the
+proposed changes transactionally to the real watchlist table.
+
+**New module — `services/watchlist_evaluator.py`:**
+- `SymbolEvalResult` / `DryRunEvaluationResult` dataclasses (fields per the
+  Phase 4 spec: counts before/after every tier, proposed promotions/
+  demotions/ineligible/recoveries, provider/cache/request stats, warnings,
+  fatal_error).
+- `run_dry_run_evaluation(client=None, triggered_by="manual", now=None)` —
+  main entrypoint. Accepts any object implementing `validate_batch()` /
+  `get_history()` (duck-typed like `MarketDataClient`), so tests inject a
+  fully-controlled fake with zero network calls.
+- `_ActiveTracker` — simulates the proposed ACTIVE set as promotion/
+  demotion decisions are made, enforcing the 30 cap, 8 bank cap, and
+  5-point replacement margin with deterministic (score desc, symbol asc)
+  tie-breaking.
+
+**Universe selection (with skip_reason recorded for every excluded
+symbol):** evaluates ACTIVE+MONITOR stock symbols, never-classified stock
+symbols (`wl_classified=0`, via the new read-only `get_unclassified_symbols()`),
+and TEMPORARILY_INELIGIBLE symbols whose `reeval_date` has passed (NULL
+`reeval_date` is treated as always-due, since nothing sets this column
+yet). Skips USER_REMOVED, ETF_INDEX_CONTEXT, ETF/index/crypto security
+types, disabled rows, and not-yet-due TEMPORARILY_INELIGIBLE symbols.
+
+**Recovery semantics (documented design decision):** `determine_state_change()`
+in `analyzers/eligibility.py` has no TEMPORARILY_INELIGIBLE → MONITOR
+recovery branch — it only promotes from `current_state == 'MONITOR'`. Per
+spec, a recovered symbol must land in MONITOR, not be promoted directly to
+ACTIVE in the same cycle. This recovery transition is implemented in the
+evaluator itself, not by modifying the shared, already-tested
+`determine_state_change()` contract used elsewhere.
+
+**Provider-outage handling:** if the fraction of evaluated symbols
+returning RATE_LIMITED/PROVIDER_ERROR/TEMPORARY_FAILURE reaches
+`config.WATCHLIST_PROVIDER_OUTAGE_THRESHOLD_PCT` (default 0.4), the run is
+marked `provider_degraded` and every ACTIVE→MONITOR demotion proposal
+based on a legitimately low score is reverted back to "stay ACTIVE" with
+an explanatory reason; the evaluation_runs row is finalized as
+`partial_failure`. Symbols kept ACTIVE this way are tracked internally
+with a protected sentinel score so they can never be evicted by a
+same-run promotion's replacement-margin check. **Documented scope
+limitation:** outage suppression only covers score-driven demotions —
+data-quality failures (STALE_DATA, MISSING_OHLCV, etc.) are treated as
+symbol-specific per the spec's literal wording and are not suppressed.
+
+**Database change:** `db/database.py` gained one new read-only helper,
+`get_unclassified_symbols()` (plain `SELECT`, no writes).
+
+**New config constant:** `WATCHLIST_PROVIDER_OUTAGE_THRESHOLD_PCT` (0.4),
+overridable via env var.
+
+**CLI script — `scripts/dry_run_evaluation.py`:** manual, opt-in entrypoint.
+`--db <path>` points it at a temp/test SQLite file instead of the real
+`db/stocksage.db`; `--mock` skips all network calls. Prints a plain-text
+summary; never sends a Telegram message (does not import the bot); cannot
+write to the watchlist table (that capability doesn't exist yet). **Not
+run against the real production DB this session** — only exercised against
+a temporary DB with `--mock` per the user's explicit instruction to ask
+before running anything against production.
+
+**Testing note:** all 28 new tests use a `FakeMarketDataClient` (duck-typed
+fully-controlled fake, no `yf.download` involved at all) and a temporary
+SQLite file per test. Zero production DB usage, zero live network calls,
+zero Telegram imports (asserted by a dedicated test).
+
+**Revert command:**
+```
+git revert <commit-hash-of-this-entry>
+```
+Note: purely additive (new module/script, one new read-only DB helper, one
+new config constant); does not modify any existing function's behavior
+used by other code, so reverting is safe.
+
+**Affects production behavior** | No — nothing calls `run_dry_run_evaluation()`
+automatically yet; it is only reachable via the new manual CLI script or
+direct import. Phase 5 will be the first phase that can change a real
+watchlist row.

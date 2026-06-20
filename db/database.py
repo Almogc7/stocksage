@@ -358,6 +358,17 @@ def get_symbols_by_state(state: str) -> list[str]:
     return [row["symbol"] for row in rows]
 
 
+def get_unclassified_symbols() -> list[str]:
+    """Return enabled=1 symbols that have never been through
+    run_initial_classification() yet (wl_classified=0). Read-only helper for
+    the Phase 4 dry-run evaluator; does not modify any row."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT symbol FROM watchlist WHERE wl_classified = 0 AND enabled = 1 ORDER BY symbol"
+        ).fetchall()
+    return [row["symbol"] for row in rows]
+
+
 def get_watchlist_summary() -> dict[str, int]:
     """Return state → count for all rows (both enabled and disabled)."""
     with _connect() as conn:

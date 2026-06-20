@@ -552,3 +552,13 @@ MARKET_DATA_INVALID_SYMBOL_RETRY_HOURS: int = int(os.getenv("MARKET_DATA_INVALID
 # How long to wait before re-checking a symbol with a data-quality problem
 # (stale data, insufficient history, missing volume, etc.)
 MARKET_DATA_DATA_QUALITY_RETRY_HOURS: int = int(os.getenv("MARKET_DATA_DATA_QUALITY_RETRY_HOURS", "24"))
+
+# ─────────────────────────────────────────────
+#  Dry-run watchlist evaluator (Phase 4 — services/watchlist_evaluator.py)
+# ─────────────────────────────────────────────
+# Fraction of evaluated symbols returning RATE_LIMITED/PROVIDER_ERROR/
+# TEMPORARY_FAILURE above which a run is treated as "provider degraded"
+# (suppresses mass ACTIVE -> MONITOR demotion proposals for that run).
+WATCHLIST_PROVIDER_OUTAGE_THRESHOLD_PCT: float = float(
+    os.getenv("WATCHLIST_PROVIDER_OUTAGE_THRESHOLD_PCT", "0.4")
+)
