@@ -198,6 +198,9 @@ async def run_morning_scan(bot: Bot, chat_id: str) -> None:
             df = get_historical(symbol, period="1y")
             if df is None:
                 continue
+            if len(df) < 200:
+                print(f"[SCAN SKIP] {symbol} — insufficient data ({len(df)} rows, need ≥200)")
+                continue
             price_data = get_current_price(symbol)
             if not price_data:
                 continue
@@ -251,6 +254,9 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
         # Gate 4: expensive compute — only reached if all cheap gates passed
         df = get_historical(symbol, period="1y")
         if df is None:
+            continue
+        if len(df) < 200:
+            print(f"[ALERT SKIP] {symbol} — insufficient data ({len(df)} rows, need ≥200)")
             continue
 
         analysis  = full_analysis(symbol, df, price_data["price"])
