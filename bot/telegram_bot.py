@@ -171,6 +171,21 @@ STRINGS: dict[str, dict[str, str]] = {
         "help_test":             "בדיקת חיבור Bot",
         "help_help":             "הצג תפריט זה",
         "help_language":         "שנה שפה",
+        # help — Phase 9B-1 additions
+        "help_start":               "התחלה",
+        "help_general_sec":          "\U0001f9ed כללי",
+        "help_alerts_sec":           "\U0001f514 התראות",
+        "help_admin_hint":           "לרשימת פקודות טכניות/ניהול, הקלד /admin_help",
+        "help_legacy_note":          "(alias ותיק)",
+        "help_watchlist_active":     "הצג מניות Active",
+        "help_watchlist_monitor":    "הצג מועמדים ב-Monitor",
+        "help_watchlist_context":    "הצג ETF/מדדים בהקשר",
+        "help_watchlist_ineligible": "הצג מניות לא זמינות זמנית",
+        "help_watchlist_status":     "סטטוס מלא למניה בודדת",
+        "help_refresh_watchlist":    "הרץ רענון watchlist בטוח (dry-run)",
+        "help_watchlist_refresh_status": "סטטוס רענון watchlist אחרון",
+        "help_watchlist_changes":    "שינויים אחרונים ב-watchlist",
+        "admin_help_title":          "\U0001f6e0 פקודות ניהול/טכניות",
         # watchlist tiers
         "wl_active_title":       "Active Watchlist",
         "wl_monitor_title":      "Monitor Tier",
@@ -284,6 +299,21 @@ STRINGS: dict[str, dict[str, str]] = {
         "help_test":             "Connection test",
         "help_help":             "Show this menu",
         "help_language":         "Change language",
+        # help — Phase 9B-1 additions
+        "help_start":               "Getting started",
+        "help_general_sec":          "\U0001f9ed General",
+        "help_alerts_sec":           "\U0001f514 Alerts",
+        "help_admin_hint":           "For technical/admin commands, type /admin_help",
+        "help_legacy_note":          "(legacy alias)",
+        "help_watchlist_active":     "Show ACTIVE symbols",
+        "help_watchlist_monitor":    "Show MONITOR candidates",
+        "help_watchlist_context":    "Show ETF/index context symbols",
+        "help_watchlist_ineligible": "Show temporarily ineligible symbols",
+        "help_watchlist_status":     "Full status for one symbol",
+        "help_refresh_watchlist":    "Run a safe watchlist refresh (dry-run)",
+        "help_watchlist_refresh_status": "Last watchlist refresh status",
+        "help_watchlist_changes":    "Recent watchlist changes",
+        "admin_help_title":          "\U0001f6e0 Admin / Debug Commands",
         # watchlist tiers
         "wl_active_title":       "Active Watchlist",
         "wl_monitor_title":      "Monitor Tier",
@@ -699,6 +729,18 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Full, accurate command menu grouped by General / Analysis / Watchlist /
+    Trades / Alerts (Phase 9B-1). Every command in this section is either
+    listed here directly or pointed at via /admin_help — nothing registered
+    in _BOT_COMMANDS/run_bot() should be undiscoverable from /help.
+
+    Renamed commands (/watchlist_add, /watchlist_remove, /morning_scan) are
+    shown as the primary name; their pre-existing counterparts (/add,
+    /remove, /scan) still work identically (same handler function — see
+    run_bot()) and are noted inline as "(legacy alias)" rather than removed,
+    per the backward-compatibility requirement for this phase.
+    """
     if not await _check_auth(update):
         return
     lang = get_language(str(update.effective_chat.id))
@@ -708,26 +750,62 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         f"{s['help_title']}\n"
         f"{sep}\n"
+        f"{s['help_general_sec']}\n"
+        f"/start — {s['help_start']}\n"
+        f"/help — {s['help_help']}\n"
+        f"/status — {s['help_status']}\n"
+        f"/language he|en — {s['help_language']}\n"
+        f"\n"
         f"{s['help_analysis_sec']}\n"
         f"/analyze SYMBOL — {s['help_analyze']}\n"
-        f"/scan — {s['help_scan']}\n"
+        f"/morning_scan — {s['help_scan']} {s['help_legacy_note']}: /scan\n"
         f"\n"
         f"{s['help_watchlist_sec']}\n"
         f"/watchlist — {s['help_watchlist_cmd']}\n"
-        f"/add SYMBOL CATEGORY — {s['help_add']}\n"
-        f"/remove SYMBOL — {s['help_remove']}\n"
+        f"/watchlist_active — {s['help_watchlist_active']}\n"
+        f"/watchlist_monitor — {s['help_watchlist_monitor']}\n"
+        f"/watchlist_context — {s['help_watchlist_context']}\n"
+        f"/watchlist_ineligible — {s['help_watchlist_ineligible']}\n"
+        f"/watchlist_status SYMBOL — {s['help_watchlist_status']}\n"
+        f"/watchlist_add SYMBOL CATEGORY — {s['help_add']} {s['help_legacy_note']}: /add\n"
+        f"/watchlist_remove SYMBOL — {s['help_remove']} {s['help_legacy_note']}: /remove\n"
+        f"/refresh_watchlist — {s['help_refresh_watchlist']}\n"
         f"\n"
         f"{s['help_trades_sec']}\n"
         f"/trade BUY|SELL SYMBOL QTY PRICE — {s['help_trade']}\n"
         f"/trades SYMBOL — {s['help_trades_cmd']}\n"
         f"/summary SYMBOL — {s['help_summary']}\n"
         f"\n"
-        f"{s['help_tools_sec']}\n"
+        f"{s['help_alerts_sec']}\n"
         f"/alerts — {s['help_alerts']}\n"
-        f"/status — {s['help_status']}\n"
+        f"\n"
+        f"{sep}\n"
+        f"{s['help_admin_hint']}\n"
+        f"{sep}"
+    )
+    await _send(update, text)
+
+
+async def cmd_admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Secondary help surface (Phase 9B-1) for technical/operational commands
+    that don't belong in the main /help daily-use menu: connectivity check
+    and watchlist-refresh-pipeline auditing tools. Read-only, same auth gate
+    as every other command — this is not a privilege tier, just a less
+    cluttered place for less-frequently-needed commands to live.
+    """
+    if not await _check_auth(update):
+        return
+    lang = get_language(str(update.effective_chat.id))
+    s = STRINGS[lang]
+    sep = "━" * 19
+
+    text = (
+        f"{s['admin_help_title']}\n"
+        f"{sep}\n"
         f"/test — {s['help_test']}\n"
-        f"/language he|en — {s['help_language']}\n"
-        f"/help — {s['help_help']}\n"
+        f"/watchlist_refresh_status — {s['help_watchlist_refresh_status']}\n"
+        f"/watchlist_changes — {s['help_watchlist_changes']}\n"
         f"{sep}"
     )
     await _send(update, text)
@@ -1226,6 +1304,13 @@ _BOT_COMMANDS = [
     BotCommand("refresh_watchlist",        "Run a safe watchlist refresh (dry-run)"),
     BotCommand("watchlist_refresh_status", "Show last refresh status"),
     BotCommand("watchlist_changes",        "Show recent watchlist changes"),
+    # Phase 9B-1: renamed aliases + admin help. Old names above are kept
+    # registered and in this menu unchanged -- these are additive, not
+    # replacements (see cmd_help()'s docstring and run_bot() below).
+    BotCommand("watchlist_add",    "הוסף מניה לרשימה (alias ל-/add)"),
+    BotCommand("watchlist_remove", "הסר מניה (alias ל-/remove)"),
+    BotCommand("morning_scan",     "סריקת מניות חמות (alias ל-/scan)"),
+    BotCommand("admin_help",       "פקודות ניהול/טכניות"),
 ]
 
 
@@ -1271,5 +1356,14 @@ def run_bot(token: str) -> None:
     app.add_handler(CommandHandler("refresh_watchlist",         cmd_refresh_watchlist))
     app.add_handler(CommandHandler("watchlist_refresh_status",  cmd_watchlist_refresh_status))
     app.add_handler(CommandHandler("watchlist_changes",         cmd_watchlist_changes))
+
+    # Phase 9B-1: renamed aliases -- same handler functions as their legacy
+    # counterparts above, so behavior is identical by construction. The
+    # legacy names (/add, /remove, /scan) remain registered and functional;
+    # nothing here changes cmd_add/cmd_remove/cmd_scan themselves.
+    app.add_handler(CommandHandler("watchlist_add",    cmd_add))
+    app.add_handler(CommandHandler("watchlist_remove", cmd_remove))
+    app.add_handler(CommandHandler("morning_scan",     cmd_scan))
+    app.add_handler(CommandHandler("admin_help",       cmd_admin_help))
 
     app.run_polling()
