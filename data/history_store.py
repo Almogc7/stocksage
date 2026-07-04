@@ -1,28 +1,33 @@
 """
-Historical OHLCV storage for the scanner engine (Phase 4).
+Historical OHLCV storage for the scanner engine (Phase 4, updated in
+Phase 5 to fetch through MarketDataService instead of yfinance directly).
 
-Fetches daily history via the existing data/fetcher.py yfinance flow and
-persists it into the stock_prices table (added in Phase 3) using the
-insert_stock_prices()/get_stock_prices() helpers already in db/database.py.
+Fetches daily history via MarketDataService (Stooq primary, yfinance
+fallback — Phase 5) and persists it into the stock_prices table (added in
+Phase 3) using the insert_stock_prices()/get_stock_prices() helpers already
+in db/database.py.
 
-What this module does NOT do (later phases):
-  - No provider fallback (Stooq or otherwise) — yfinance only, via the
-    existing data.fetcher.get_historical() call.
+What this module does NOT do:
   - No scanner/scoring logic — this is a pure fetch-and-cache layer.
   - Does not touch agent/core.py's live alert path or any Telegram code.
+  - Does not introduce incremental fetching — every call still re-fetches
+    the full requested period (kept for Phase 5; see data/market_data_service.py
+    docstring for the provider-fallback design this builds on).
 
 Idempotency: insert_stock_prices() upserts on UNIQUE(symbol, timeframe,
 date), so calling fetch_and_store_history() again for the same symbol/period
 updates existing rows in place rather than creating duplicates.
+
+Provider source: each stored row's `source` column reflects whichever
+provider (e.g. "stooq" or "yfinance") actually returned the data for that
+fetch, not a fixed default.
 """
 from __future__ import annotations
 
 import math
 
-from data.fetcher import get_historical
+from data.market_data_service import MarketDataService
 from db.database import get_stock_prices, insert_stock_prices
-
-DEFAULT_SOURCE = "yfinance"
 
 # "1y" comfortably covers the >=250 completed daily candles this phase
 # requires (roughly 252 trading days/year).
@@ -48,25 +53,37 @@ def fetch_and_store_history(
     *,
     period: str = DEFAULT_PERIOD,
     interval: str = DEFAULT_INTERVAL,
-    source: str = DEFAULT_SOURCE,
+    service: MarketDataService | None = None,
 ) -> int:
     """
-    Fetch daily OHLCV history for `symbol` via the existing yfinance flow
-    and upsert it into stock_prices.
+    Fetch daily OHLCV history for `symbol` via MarketDataService (Stooq
+    primary, yfinance fallback) and upsert it into stock_prices.
 
-    Returns the number of rows written (0 if the fetch failed or returned no
-    data — never raises on a fetch failure, matching data.fetcher's existing
-    convention of returning None/logging a warning instead of raising).
+    `service` defaults to a fresh MarketDataService() (Stooq then yfinance);
+    pass an explicit instance to control provider order/behavior, or a fake
+    in tests to avoid any real network/provider call.
+
+    Returns the number of rows written (0 if every provider failed or
+    returned no usable data — never raises on a fetch failure).
 
     Rows with no usable 'close' value are skipped (stock_prices.close is
     NOT NULL); all other OHLCV fields are stored as-is, coerced to
-    plain Python float/int (NaN becomes None).
+    plain Python float/int (NaN becomes None). The `source` column on every
+    stored row reflects whichever provider actually supplied the data.
     """
     sym = symbol.upper()
-    df = get_historical(sym, period=period, interval=interval)
-    if df is None or df.empty:
-        print(f"[history_store] Warning: no historical data to store for {sym}")
+    svc = service or MarketDataService()
+    result = svc.fetch_history(sym, period=period, interval=interval)
+
+    if not result.ok:
+        print(
+            f"[history_store] Warning: no historical data to store for {sym}"
+            f" (attempted={result.attempted}, failures={result.failures})"
+        )
         return 0
+
+    df = result.df
+    source = result.provider_name
 
     rows: list[dict] = []
     for idx, row in df.iterrows():
@@ -91,7 +108,7 @@ def fetch_and_store_history(
         return 0
 
     written = insert_stock_prices(rows)
-    print(f"[history_store] Stored {written} row(s) for {sym} (timeframe={interval})")
+    print(f"[history_store] Stored {written} row(s) for {sym} (timeframe={interval}, source={source})")
     return written
 
 
