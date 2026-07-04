@@ -94,6 +94,17 @@ def migrate_db() -> None:
     New table in v5:
       evaluation_run_changes — per-symbol audit trail for apply-mode runs,
       enabling rollback_evaluation_run(). Never written for dry-run runs.
+
+    New table in v6 (scanner engine, DB-only phase):
+      stock_prices — cached daily/intraday OHLCV bars per (symbol, timeframe,
+      date). Purely additive; nothing currently reads or writes it outside
+      the new insert_stock_prices()/get_stock_prices() helpers.
+
+    New tables in v7 (scanner engine, DB-only phase):
+      scanner_runs — one row per scanner invocation (bookkeeping, mirrors
+      evaluation_runs).
+      scanner_results — one row per (run, symbol) scan outcome, mirrors
+      evaluation_run_changes' per-symbol-detail shape.
     """
     with _connect() as conn:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()}
@@ -213,6 +224,72 @@ def migrate_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_evaluation_run_changes_run_id"
             " ON evaluation_run_changes(run_id)"
+        )
+
+        # v6 table — cached OHLCV price bars for the scanner engine's DB-only
+        # phase. Standalone cache table: no foreign key into watchlist, and
+        # nothing in the existing alert/watchlist/evaluation code paths reads
+        # or writes it. UNIQUE(symbol, timeframe, date) makes re-fetching the
+        # same bar an idempotent upsert rather than a duplicate row.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS stock_prices (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol     TEXT NOT NULL,
+                timeframe  TEXT NOT NULL DEFAULT '1d',
+                date       TEXT NOT NULL,
+                open       REAL,
+                high       REAL,
+                low        REAL,
+                close      REAL NOT NULL,
+                volume     INTEGER,
+                source     TEXT,
+                fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(symbol, timeframe, date)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stock_prices_symbol_timeframe_date"
+            " ON stock_prices(symbol, timeframe, date)"
+        )
+
+        # v7 tables — scanner run bookkeeping + per-symbol scan results.
+        # Mirrors the evaluation_runs / evaluation_run_changes shape: a run
+        # header row plus one detail row per (run, symbol). Never modifies
+        # watchlist, alerts, or evaluation_runs.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scanner_runs (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                scanner_name     TEXT NOT NULL,
+                started_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+                finished_at      TEXT,
+                status           TEXT NOT NULL DEFAULT 'running',
+                symbols_scanned  INTEGER DEFAULT 0,
+                symbols_passed   INTEGER DEFAULT 0,
+                notes            TEXT
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scanner_results (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id        INTEGER,
+                symbol        TEXT NOT NULL,
+                scanner_name  TEXT NOT NULL,
+                timeframe     TEXT NOT NULL DEFAULT '1d',
+                passed        INTEGER NOT NULL,
+                score         REAL,
+                reason        TEXT,
+                details_json  TEXT,
+                scanned_at    TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scanner_results_run_id"
+            " ON scanner_results(run_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scanner_results_symbol_scanner_scanned"
+            " ON scanner_results(symbol, scanner_name, scanned_at)"
         )
 
         # v2 table
@@ -1134,3 +1211,237 @@ def get_in_progress_evaluation_run() -> dict | None:
             " ORDER BY started_at DESC, run_id DESC LIMIT 1"
         ).fetchone()
     return _row_to_run_dict(row) if row else None
+
+
+# ── Price history (scanner engine, DB-only phase) ────────────────────────────
+#
+# Standalone OHLCV cache. Nothing in the existing alert/watchlist/evaluation
+# code paths reads or writes stock_prices — these helpers are the only entry
+# points. No live provider/fetch logic lives here; callers pass already-
+# fetched rows in.
+
+def insert_stock_prices(rows: list[dict]) -> int:
+    """
+    Upsert a batch of OHLCV bars. Each row dict must contain at least
+    "symbol", "date", and "close"; "timeframe" defaults to '1d' if omitted.
+    Optional keys: open, high, low, volume, source, fetched_at.
+
+    Re-inserting a bar for the same (symbol, timeframe, date) updates the
+    existing row in place (refreshed data wins) rather than raising or
+    creating a duplicate — this is what makes repeated fetches of the same
+    trading day idempotent. Returns the number of rows written.
+
+    All rows are written in ONE transaction: if any row is malformed the
+    whole batch rolls back rather than partially applying.
+    """
+    if not rows:
+        return 0
+
+    with _connect() as conn:
+        for row in rows:
+            symbol = row["symbol"].upper()
+            timeframe = row.get("timeframe", "1d")
+            conn.execute(
+                """INSERT INTO stock_prices
+                   (symbol, timeframe, date, open, high, low, close, volume, source, fetched_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+                   ON CONFLICT(symbol, timeframe, date) DO UPDATE SET
+                       open = excluded.open,
+                       high = excluded.high,
+                       low = excluded.low,
+                       close = excluded.close,
+                       volume = excluded.volume,
+                       source = excluded.source,
+                       fetched_at = excluded.fetched_at""",
+                (
+                    symbol, timeframe, row["date"],
+                    row.get("open"), row.get("high"), row.get("low"), row["close"],
+                    row.get("volume"), row.get("source"), row.get("fetched_at"),
+                ),
+            )
+    return len(rows)
+
+
+def get_stock_prices(
+    symbol: str,
+    timeframe: str = "1d",
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """Read-only: bars for one symbol/timeframe, ascending by date, optionally
+    bounded by an inclusive [start_date, end_date] range and/or a row limit
+    (limit keeps the most recent rows when the range is large)."""
+    where = "WHERE symbol = ? AND timeframe = ?"
+    params: list = [symbol.upper(), timeframe]
+    if start_date:
+        where += " AND date >= ?"
+        params.append(start_date)
+    if end_date:
+        where += " AND date <= ?"
+        params.append(end_date)
+
+    if limit:
+        # Take the most recent `limit` rows first, then re-sort ascending —
+        # otherwise a plain "ORDER BY date ASC LIMIT n" would return the
+        # oldest rows in the range instead of the most recent ones.
+        query = (
+            f"SELECT * FROM (SELECT * FROM stock_prices {where}"
+            f" ORDER BY date DESC LIMIT ?) ORDER BY date ASC"
+        )
+        params.append(limit)
+    else:
+        query = f"SELECT * FROM stock_prices {where} ORDER BY date ASC"
+
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_latest_stock_price(symbol: str, timeframe: str = "1d") -> dict | None:
+    """Read-only: the most recent bar for one symbol/timeframe, or None."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM stock_prices WHERE symbol = ? AND timeframe = ?"
+            " ORDER BY date DESC LIMIT 1",
+            (symbol.upper(), timeframe),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+# ── Scanner runs / results (scanner engine, DB-only phase) ───────────────────
+#
+# Bookkeeping only — no live scan logic lives here. Mirrors the
+# evaluation_runs / evaluation_run_changes shape already used for the
+# watchlist evaluator: a run header row plus one detail row per symbol.
+
+def create_scanner_run(scanner_name: str, *, started_at: str | None = None) -> int:
+    """Insert a new scanner run with status='running'. Returns its id."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO scanner_runs (scanner_name, started_at, status)"
+            " VALUES (?, ?, 'running')",
+            (scanner_name, started_at or _utc_now_str()),
+        )
+        return cur.lastrowid
+
+
+def finish_scanner_run(
+    run_id: int,
+    *,
+    status: str = "completed",
+    symbols_scanned: int | None = None,
+    symbols_passed: int | None = None,
+    notes: str | None = None,
+    finished_at: str | None = None,
+) -> None:
+    """Finalize a scanner run: set status/finished_at and optional counts."""
+    set_clauses = ["status = ?", "finished_at = ?"]
+    params: list = [status, finished_at or _utc_now_str()]
+    if symbols_scanned is not None:
+        set_clauses.append("symbols_scanned = ?")
+        params.append(symbols_scanned)
+    if symbols_passed is not None:
+        set_clauses.append("symbols_passed = ?")
+        params.append(symbols_passed)
+    if notes is not None:
+        set_clauses.append("notes = ?")
+        params.append(notes)
+    params.append(run_id)
+
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE scanner_runs SET {', '.join(set_clauses)} WHERE id = ?",
+            params,
+        )
+
+
+def get_scanner_run(run_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM scanner_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def record_scanner_result(
+    run_id: int | None,
+    symbol: str,
+    scanner_name: str,
+    *,
+    passed: bool,
+    timeframe: str = "1d",
+    score: float | None = None,
+    reason: str | None = None,
+    details: dict | None = None,
+    scanned_at: str | None = None,
+) -> int:
+    """Insert one per-symbol scan outcome row. Returns its id."""
+    with _connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO scanner_results
+               (run_id, symbol, scanner_name, timeframe, passed, score, reason,
+                details_json, scanned_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id, symbol.upper(), scanner_name, timeframe,
+                1 if passed else 0, score, reason,
+                json.dumps(details) if details is not None else None,
+                scanned_at or _utc_now_str(),
+            ),
+        )
+        return cur.lastrowid
+
+
+def record_scanner_results(run_id: int | None, results: list[dict]) -> int:
+    """
+    Bulk insert per-symbol scan outcomes in ONE transaction. Each dict must
+    contain "symbol", "scanner_name", "passed" plus any optional keys accepted
+    by record_scanner_result. Returns the number of rows written.
+    """
+    if not results:
+        return 0
+    with _connect() as conn:
+        for r in results:
+            conn.execute(
+                """INSERT INTO scanner_results
+                   (run_id, symbol, scanner_name, timeframe, passed, score, reason,
+                    details_json, scanned_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id, r["symbol"].upper(), r["scanner_name"],
+                    r.get("timeframe", "1d"), 1 if r["passed"] else 0,
+                    r.get("score"), r.get("reason"),
+                    json.dumps(r["details"]) if r.get("details") is not None else None,
+                    r.get("scanned_at") or _utc_now_str(),
+                ),
+            )
+    return len(results)
+
+
+def get_scanner_results(run_id: int) -> list[dict]:
+    """Read-only: all result rows for one scanner run, insertion order."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM scanner_results WHERE run_id = ? ORDER BY id", (run_id,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_latest_scanner_results_for_symbol(
+    symbol: str, scanner_name: str | None = None, limit: int = 10
+) -> list[dict]:
+    """Read-only: most recent scan outcomes for one symbol, newest first,
+    optionally filtered to a single scanner_name."""
+    query = "SELECT * FROM scanner_results WHERE symbol = ?"
+    params: list = [symbol.upper()]
+    if scanner_name:
+        query += " AND scanner_name = ?"
+        params.append(scanner_name)
+    query += " ORDER BY scanned_at DESC LIMIT ?"
+    params.append(limit)
+
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(row) for row in rows]
