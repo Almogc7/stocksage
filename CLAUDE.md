@@ -28,6 +28,10 @@ python scripts/rollback_evaluation_run.py
 
 # Manual strong-trend scanner (Stack C, reads cached stock_prices only)
 python scripts/run_strong_trend_scan.py
+
+# Composite-vs-legacy score comparison across the ACTIVE tier (live fetch,
+# read-only DB; the composite engine is NOT wired into alerting)
+python scripts/run_composite_scan.py [SYMBOL ...]
 ```
 
 **Testing rule: never run tests or smoke tests against the real
@@ -107,6 +111,19 @@ become the alert engine's data backbone when the scan universe expands beyond
 the watchlist. **Treat it as a real dependency, not dead code.** Active plan:
 `docs/PLAN_SCANNER_ENGINE.md`.
 
+### Parallel scoring engine (additive, NOT yet alerting)
+
+`analyzers/composite.py` — weighted composite score (4 layers × 25 pts:
+trend/extension, momentum, volume, relative-strength) behind a two-part SMA
+hard gate, with a once-per-cycle SPY regime modifier
+(`compute_market_context()`) that adjusts the required RS ratio (1.0/1.2)
+and BUY-flag score (70/75), plus score-keyed ATR stop sizing. Runs alongside
+`check_alerts()` for output comparison (`scripts/run_composite_scan.py`);
+deliberately has NO RSI veto (unlike `full_analysis()`) and computes on
+completed bars only, except session-normalized relative volume which
+measures the live bar. Indicator math reuses the exact `ta` calls and
+parameters from `analyzers/technical.py`.
+
 ### Stack D — Dashboard (separate process)
 
 `dashboard.py` (Streamlit) calls `fetcher` + `full_analysis` + `db` directly.
@@ -147,6 +164,13 @@ Watchlist lifecycle: `ACTIVE_MAX_SIZE=30`, promotion/demotion thresholds and
 hysteresis, eligibility liquidity floors.
 Telegram auth: `AUTHORIZED_CHAT_IDS` allowlist (falls back to
 `TELEGRAM_CHAT_ID`).
+
+Composite engine: `COMPOSITE_RS_WINDOW_DAYS=60`,
+`COMPOSITE_RS_REQUIRED_BULL/BEAR=1.0/1.2`,
+`COMPOSITE_REQUIRED_SCORE_BULL/BEAR=70/75`, `COMPOSITE_RELVOL_FULL=1.5`,
+`COMPOSITE_BREAKOUT_RELVOL=2.0`, `COMPOSITE_EXTENSION_MAX_PCT=10`.
+Composite scores are NOT comparable to the legacy 0–100 score or to
+`ALERT_MIN_SCORE=65` — different scales, different BUY bars.
 
 Note: MACD/Bollinger/ATR/volume-spike parameters remain hardcoded in
 `analyzers/technical.py`; only the RSI bands are config-driven so far.
@@ -199,6 +223,12 @@ Also completed:
 - `is_market_open()` (in `data/fetcher.py`) ignores US holidays; the
   16:35-IL morning-scan trigger breaks during US/IL DST mismatch weeks.
 - `bot/telegram_bot.py`'s `_rec_emoji` maps verdicts that are never emitted.
-- Incomplete-bar handling is inconsistent: Gate 7 (green candle) uses the
-  last completed candle during market hours, but volume spike / MACD / RSI
-  still evaluate the in-progress bar.
+- Incomplete-bar handling is inconsistent in the LEGACY path: Gate 7 (green
+  candle) uses the last completed candle during market hours, but volume
+  spike / MACD / RSI still evaluate the in-progress bar. (The composite
+  engine is completed-bars-only by construction.)
+- `full_analysis()`'s returned `current_price` is silently overwritten by
+  `calc_bollinger()`'s last close via dict-spread ordering in
+  `_base_result()` — callers receive the last close, not the live price they
+  passed in. Ticketed for a future cleanup pass; the composite engine does
+  not consume that key.

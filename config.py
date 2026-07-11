@@ -420,6 +420,31 @@ RSI_HEALTHY_MAX: int = 65
 ALERT_REQUIRE_GREEN_CANDLE: bool = True
 
 # ─────────────────────────────────────────────
+#  Composite scoring engine (analyzers/composite.py)
+#  Parallel to the legacy gate path — NOT wired into alerting yet.
+# ─────────────────────────────────────────────
+# Lookback window (completed trading days) for the Relative Strength ratio
+# RS = (1 + stock_return) / (1 + SPY_return)
+COMPOSITE_RS_WINDOW_DAYS: int = int(os.getenv("COMPOSITE_RS_WINDOW_DAYS", "60"))
+
+# Regime-dependent thresholds (regime = SPY close vs SPY SMA150, once per cycle)
+COMPOSITE_RS_REQUIRED_BULL: float = float(os.getenv("COMPOSITE_RS_REQUIRED_BULL", "1.0"))
+COMPOSITE_RS_REQUIRED_BEAR: float = float(os.getenv("COMPOSITE_RS_REQUIRED_BEAR", "1.2"))
+COMPOSITE_REQUIRED_SCORE_BULL: int = int(os.getenv("COMPOSITE_REQUIRED_SCORE_BULL", "70"))
+COMPOSITE_REQUIRED_SCORE_BEAR: int = int(os.getenv("COMPOSITE_REQUIRED_SCORE_BEAR", "75"))
+
+# Relative volume at which the volume component reaches full points
+# (session-elapsed normalized — see composite.py _session_fraction)
+COMPOSITE_RELVOL_FULL: float = float(os.getenv("COMPOSITE_RELVOL_FULL", "1.5"))
+
+# Relative volume required for the SMA150-reclaim breakout bonus (completed bar)
+COMPOSITE_BREAKOUT_RELVOL: float = float(os.getenv("COMPOSITE_BREAKOUT_RELVOL", "2.0"))
+
+# Extension above SMA150 (%) that still earns full extension points;
+# points taper linearly to 0 at twice this value
+COMPOSITE_EXTENSION_MAX_PCT: float = float(os.getenv("COMPOSITE_EXTENSION_MAX_PCT", "10.0"))
+
+# ─────────────────────────────────────────────
 #  סריקת בוקר
 # ─────────────────────────────────────────────
 
