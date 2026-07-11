@@ -629,7 +629,7 @@ async def cmd_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     total = quantity * price
     stop_str   = "N/A"
     target_str = "N/A"
-    df = get_historical(symbol, period="6mo")
+    df = get_historical(symbol, period="1y")
     if df is not None:
         from analyzers.technical import calc_atr
         atr_data   = calc_atr(df)
