@@ -27,21 +27,21 @@ _MINIMAL_SWINGS = {
     "swing_highs": [], "swing_lows": [],
     "nearest_resistance": None, "nearest_support": None,
 }
-_ABOVE_EMA = {"ema150": 90.0, "above_ema150": True, "pct_from_ema": 10.0}
+_ABOVE_SMA = {"sma150": 90.0, "above_sma150": True, "pct_from_sma": 10.0}
 
 
 def _run_full_analysis_with_rsi(rsi_value: float) -> dict:
     """
     Call full_analysis() with all expensive helpers mocked, injecting a
     specific RSI value so we can test the scoring branch in isolation.
-    Current price is always 100.0; EMA150 is 90.0 so price > EMA150.
+    Current price is always 100.0; SMA150 is 90.0 so price > SMA150.
     """
     from analyzers.technical import full_analysis
 
     df = make_trending_df()
 
     with (
-        patch("analyzers.technical.check_ema150", return_value=_ABOVE_EMA),
+        patch("analyzers.technical.check_sma150", return_value=_ABOVE_SMA),
         patch("analyzers.technical.calc_rsi",
               return_value={"rsi": rsi_value, "signal": "neutral"}),
         patch("analyzers.technical.calc_macd", return_value=_MINIMAL_MACD),
@@ -49,7 +49,7 @@ def _run_full_analysis_with_rsi(rsi_value: float) -> dict:
         patch("analyzers.technical.calc_atr", return_value=_MINIMAL_ATR),
         patch("analyzers.technical.calc_pivot_points", return_value=_MINIMAL_PIVOTS),
         patch("analyzers.technical.calc_swing_levels", return_value=_MINIMAL_SWINGS),
-        patch("analyzers.technical._ema200", return_value=None),
+        patch("analyzers.technical._sma200", return_value=None),
         patch("analyzers.technical._vwap", return_value=None),
         patch("analyzers.technical._macd_bullish_last3", return_value=False),
         patch("analyzers.technical._volume_spike", return_value=False),
@@ -66,7 +66,7 @@ class TestRsiLabel(unittest.TestCase):
         result = _run_full_analysis_with_rsi(45.0)
         self.assertIn("rsi_healthy_range", result["triggered_signals"])
         self.assertNotIn("rsi_acceptable_zone", result["triggered_signals"])
-        self.assertEqual(result["score"], 35)  # +20 EMA + +15 RSI ideal
+        self.assertEqual(result["score"], 35)  # +20 SMA + +15 RSI ideal
 
     def test_rsi_55_ideal_midpoint(self):
         result = _run_full_analysis_with_rsi(55.0)
@@ -84,7 +84,7 @@ class TestRsiLabel(unittest.TestCase):
         result = _run_full_analysis_with_rsi(35.0)
         self.assertIn("rsi_acceptable_zone", result["triggered_signals"])
         self.assertNotIn("rsi_healthy_range", result["triggered_signals"])
-        self.assertEqual(result["score"], 25)  # +20 EMA + +5 fringe
+        self.assertEqual(result["score"], 25)  # +20 SMA + +5 fringe
 
     def test_rsi_40_fringe_low_midpoint(self):
         result = _run_full_analysis_with_rsi(40.0)

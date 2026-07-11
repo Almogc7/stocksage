@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 import ta
 
@@ -13,11 +12,15 @@ def _flatten(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ── Scoring helpers ───────────────────────────────────────────────────────────
+# 150/200 moving averages are SIMPLE (decision D1): the TradingView
+# "Swing Trade Analyser" Pine Script — the methodology source of truth —
+# uses ta.sma() for the 150/200 lines, and Stack C's cached_indicators.py
+# is SMA-based as well.
 
-def _ema200(df: pd.DataFrame) -> float | None:
+def _sma200(df: pd.DataFrame) -> float | None:
     if len(df) < 200:
         return None
-    return float(ta.trend.ema_indicator(df["close"], window=200).iloc[-1])
+    return float(df["close"].rolling(window=200).mean().iloc[-1])
 
 
 def _macd_bullish_last3(df: pd.DataFrame) -> bool:
@@ -72,15 +75,15 @@ def _vwap(df: pd.DataFrame, window: int = 20) -> float | None:
 
 # ── Indicators ────────────────────────────────────────────────────────────────
 
-def check_ema150(df: pd.DataFrame, current_price: float) -> dict:
+def check_sma150(df: pd.DataFrame, current_price: float) -> dict:
     df = _flatten(df)
-    ema150 = float(ta.trend.ema_indicator(df["close"], window=150).iloc[-1])
-    above = current_price > ema150
-    pct_from_ema = (current_price - ema150) / ema150 * 100
+    sma150 = float(df["close"].rolling(window=150).mean().iloc[-1])
+    above = current_price > sma150
+    pct_from_sma = (current_price - sma150) / sma150 * 100
     return {
-        "ema150": round(ema150, 4),
-        "above_ema150": above,
-        "pct_from_ema": round(pct_from_ema, 2),
+        "sma150": round(sma150, 4),
+        "above_sma150": above,
+        "pct_from_sma": round(pct_from_sma, 2),
     }
 
 
@@ -244,7 +247,7 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
     df = _flatten(df)
 
     # Compute all indicators up front so every return path has the full key set.
-    ema       = check_ema150(df, current_price)
+    sma       = check_sma150(df, current_price)
     rsi_data  = calc_rsi(df)
     macd_data = calc_macd(df)
     bb        = calc_bollinger(df)
@@ -252,7 +255,7 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
     pivots    = calc_pivot_points(df)
     swings    = calc_swing_levels(df)
 
-    ema200_val = _ema200(df)
+    sma200_val = _sma200(df)
     vwap_val   = _vwap(df)
 
     rsi        = rsi_data["rsi"]
@@ -263,14 +266,14 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
         return {
             "symbol": symbol.upper(),
             "current_price": current_price,
-            **ema,
+            **sma,
             **rsi_data,
             **macd_data,
             **bb,
             **atr,
             **pivots,
             **swings,
-            "ema200":           round(ema200_val, 4) if ema200_val is not None else None,
+            "sma200":           round(sma200_val, 4) if sma200_val is not None else None,
             "vwap":             round(vwap_val, 4)   if vwap_val   is not None else None,
             "score":            score,
             "verdict":          verdict,
@@ -285,7 +288,7 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
         }
 
     # ── Veto gates — hard disqualifiers ──────────────────────────────────────
-    if not ema["above_ema150"]:
+    if not sma["above_sma150"]:
         return _base_result(0, "NEUTRAL", [])
     if rsi < RSI_VETO_MIN:
         return _base_result(0, "NEUTRAL", [])
@@ -296,14 +299,14 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
     score: int = 0
     triggered: list[str] = []
 
-    # +20  price above EMA150 (always true here — kept for score transparency)
+    # +20  price above SMA150 (always true here — kept for score transparency)
     score += 20
-    triggered.append("price_above_ema150")
+    triggered.append("price_above_sma150")
 
-    # +15  EMA150 > EMA200 (long-term uptrend confirmed)
-    if ema200_val is not None and ema["ema150"] > ema200_val:
+    # +15  SMA150 > SMA200 (long-term uptrend confirmed)
+    if sma200_val is not None and sma["sma150"] > sma200_val:
         score += 15
-        triggered.append("ema150_above_ema200")
+        triggered.append("sma150_above_sma200")
 
     # +20  MACD bullish crossover within the last 3 candles
     if _macd_bullish_last3(df):

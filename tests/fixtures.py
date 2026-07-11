@@ -12,12 +12,12 @@ def make_trending_df(n: int = 252, seed: int = 42, trend: float = 0.0012) -> pd.
     Generate a synthetic OHLCV DataFrame with a mild upward trend.
 
     Price starts near 100 and trends up so that after ~150 bars the close
-    is above EMA150 — this keeps full_analysis() past the EMA veto gate
+    is above SMA150 — this keeps full_analysis() past the SMA veto gate
     in tests that exercise scoring logic.
 
     Parameters
     ----------
-    n:     number of trading days (≥ 200 recommended to support EMA200)
+    n:     number of trading days (≥ 200 recommended to support SMA200)
     seed:  random seed for reproducibility
     trend: mean daily log-return (positive = uptrend)
     """

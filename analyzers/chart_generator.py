@@ -26,8 +26,10 @@ def generate_chart_image(symbol: str, df: pd.DataFrame, analysis: dict) -> bytes
         verdict = analysis.get("verdict", "")
 
         # ── Indicators (computed on full df, sliced to chart window) ──────────
-        ma150 = df["close"].ewm(span=150, adjust=False).mean().tail(90)
-        ma200 = df["close"].ewm(span=200, adjust=False).mean().tail(90)
+        # SIMPLE 150/200 means (D1) — must match the SMA lines that
+        # analyzers/technical.py scores against.
+        ma150 = df["close"].rolling(window=150).mean().tail(90)
+        ma200 = df["close"].rolling(window=200).mean().tail(90)
 
         # Use ta.momentum.rsi (Wilder's smoothing / EWM alpha=1/14) to match
         # the RSI produced by analyzers/technical.py. The previous implementation
@@ -55,12 +57,12 @@ def generate_chart_image(symbol: str, df: pd.DataFrame, analysis: dict) -> bytes
 
         fig.add_trace(go.Scatter(
             x=chart_df.index, y=ma150,
-            name="MA150", line=dict(color="#ff9800", width=1.5),
+            name="SMA150", line=dict(color="#ff9800", width=1.5),
         ), row=1, col=1)
 
         fig.add_trace(go.Scatter(
             x=chart_df.index, y=ma200,
-            name="MA200", line=dict(color="#ef5350", width=1.5, dash="dash"),
+            name="SMA200", line=dict(color="#ef5350", width=1.5, dash="dash"),
         ), row=1, col=1)
 
         # Row 2 — Volume bars, coloured green/red by candle direction

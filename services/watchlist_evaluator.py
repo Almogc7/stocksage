@@ -85,6 +85,8 @@ from config import (
     DEMOTION_THRESHOLD,
     MARKET_DATA_DATA_QUALITY_RETRY_HOURS,
     PROMOTION_THRESHOLD,
+    RSI_VETO_MAX,
+    RSI_VETO_MIN,
     WATCHLIST_PROVIDER_OUTAGE_THRESHOLD_PCT,
 )
 from data.market_data_validator import MarketDataClient, ProviderStatus
@@ -928,15 +930,15 @@ def explain_symbol(symbol: str, *, client: MarketDataClient | None = None) -> di
       relevance: {score, components (0.0-1.0 each), weights (%)} — the
         watchlist relevance score, computed live, NOT persisted
       opportunity: {score, verdict, vetoed (reason or None), signals
-        (per-indicator bool), rsi, ema150, ema200} — the live alert/
+        (per-indicator bool), rsi, sma150, sma200} — the live alert/
         "opportunity" score from analyzers.technical.full_analysis()
       would_be_state, would_be_reason: hypothetical promotion/demotion
         decision using the symbol's CURRENT persisted counters — informational only
 
     History window: uses a dedicated MarketDataClient(period="1y") by
     default — NOT config.MARKET_DATA_HISTORY_PERIOD (6mo), which is too
-    short to compute EMA150/EMA200 (ta.trend.ema_indicator silently
-    returns NaN once a window exceeds the available row count). This
+    short to compute SMA150/SMA200 (a rolling mean is NaN once its window
+    exceeds the available row count). This
     matches agent/core.py's live alert path, which has always fetched
     get_historical(symbol, period="1y") via a different fetcher
     (data/fetcher.py rather than data/market_data_validator.py) — same
@@ -1040,30 +1042,30 @@ def explain_symbol(symbol: str, *, client: MarketDataClient | None = None) -> di
             analysis = None
 
     if analysis is not None:
-        ema150_val = analysis["ema150"]
-        # NaN-safe: ema150_val != ema150_val is True only for NaN (no math
+        sma150_val = analysis["sma150"]
+        # NaN-safe: sma150_val != sma150_val is True only for NaN (no math
         # import needed — same idiom as _safe_avg_volume above).
-        ema150_known = ema150_val is not None and ema150_val == ema150_val
-        # ema150_val itself may still be NaN below — never let a NaN reach
+        sma150_known = sma150_val is not None and sma150_val == sma150_val
+        # sma150_val itself may still be NaN below — never let a NaN reach
         # the formatter as a "real" value (Telegram would print "nan").
-        display_ema150 = ema150_val if ema150_known else None
+        display_sma150 = sma150_val if sma150_known else None
 
         vetoed = None
-        if not ema150_known:
-            # full_analysis()'s own veto check is `current_price > ema150`,
-            # which is unconditionally False when ema150 is NaN (any
+        if not sma150_known:
+            # full_analysis()'s own veto check is `current_price > sma150`,
+            # which is unconditionally False when sma150 is NaN (any
             # comparison against NaN is False in Python) — so the SAME
-            # underlying score/verdict (0, NEUTRAL) results whether EMA150
+            # underlying score/verdict (0, NEUTRAL) results whether SMA150
             # is genuinely below price or simply undefined for lack of
             # history. This branch only fixes the human-readable LABEL for
             # that second case; it does not change the score or verdict.
-            vetoed = "insufficient EMA150 data (need 150+ completed daily candles)"
-        elif not analysis["above_ema150"]:
-            vetoed = "price below EMA150"
-        elif analysis["rsi"] < 35:
-            vetoed = f"RSI {analysis['rsi']} < 35 (oversold veto)"
-        elif analysis["rsi"] > 75:
-            vetoed = f"RSI {analysis['rsi']} > 75 (overbought veto)"
+            vetoed = "insufficient SMA150 data (need 150+ completed daily candles)"
+        elif not analysis["above_sma150"]:
+            vetoed = "price below SMA150"
+        elif analysis["rsi"] < RSI_VETO_MIN:
+            vetoed = f"RSI {analysis['rsi']} < {RSI_VETO_MIN} (oversold veto)"
+        elif analysis["rsi"] > RSI_VETO_MAX:
+            vetoed = f"RSI {analysis['rsi']} > {RSI_VETO_MAX} (overbought veto)"
 
         triggered = set(analysis.get("triggered_signals", []))
         result["opportunity"] = {
@@ -1071,8 +1073,8 @@ def explain_symbol(symbol: str, *, client: MarketDataClient | None = None) -> di
             "verdict": analysis["verdict"],
             "vetoed": vetoed,
             "signals": {
-                "price_above_ema150": "price_above_ema150" in triggered,
-                "ema150_above_ema200": "ema150_above_ema200" in triggered,
+                "price_above_sma150": "price_above_sma150" in triggered,
+                "sma150_above_sma200": "sma150_above_sma200" in triggered,
                 "macd_bullish_crossover": "macd_bullish_crossover" in triggered,
                 "rsi_healthy_range": "rsi_healthy_range" in triggered,
                 "rsi_acceptable_zone": "rsi_acceptable_zone" in triggered,
@@ -1081,8 +1083,8 @@ def explain_symbol(symbol: str, *, client: MarketDataClient | None = None) -> di
                 "above_vwap": "above_vwap" in triggered,
             },
             "rsi": analysis["rsi"],
-            "ema150": display_ema150,
-            "ema200": analysis["ema200"],
+            "sma150": display_sma150,
+            "sma200": analysis["sma200"],
         }
 
     return result

@@ -117,8 +117,7 @@ agent scans only the ACTIVE tier — the two views intentionally differ.
 
 TradingView Pine Script "Swing Trade Analyser" v6 — hybrid MAs (EMA fast/mid,
 SMA 150/200). Per decision D1 this hybrid is the methodology source of truth;
-Python's EMA150/200 is scheduled to be aligned to SMA (consolidation step 6,
-not yet done).
+Python's 150/200 lines are SMA-aligned as of 2026-07-11 (step 6 done).
 
 ## Database
 
@@ -184,15 +183,19 @@ Planned (in order — see audit + `docs/DECISIONS.md`):
 - Step 4: fetch-layer merge onto `MarketDataService` (D2 — Stack C wins).
 - Step 5: all message formatting into `bot/formatters.py`; market calendar
   out of `data/fetcher.py`.
-- Step 6: EMA→SMA alignment for 150/200 (D1) — behavior change, do with
-  before/after comparison on cached history.
 - Step 7: split `db/database.py` by domain.
+
+Also completed:
+- **Step 6 / D1 (2026-07-11):** 150/200 MAs are SIMPLE throughout the live
+  path (`sma150`/`sma200` keys, `price_above_sma150`/`sma150_above_sma200`
+  signals); before/after comparison run on ACTIVE + MONITOR sample before
+  shipping (0 veto flips, 2 trend-signal flips in the MONITOR sample).
 
 ## Known inconsistencies (flagged, intentionally not yet fixed)
 
 - Three fetch layers (`fetcher.py`, `MarketDataClient`, `MarketDataService`)
-  and two indicator engines (`technical.py` EMA vs `cached_indicators.py`
-  SMA) coexist until steps 4/6.
+  coexist until step 4. Two indicator engines remain (`technical.py` vs
+  `cached_indicators.py`) but both are SMA-based since D1 shipped.
 - `is_market_open()` (in `data/fetcher.py`) ignores US holidays; the
   16:35-IL morning-scan trigger breaks during US/IL DST mismatch weeks.
 - `bot/telegram_bot.py`'s `_rec_emoji` maps verdicts that are never emitted.

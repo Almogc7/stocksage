@@ -38,7 +38,7 @@ def main():
     sections = {
         "Overview":     ["symbol", "current_price", "score", "verdict", "triggered_signals"],
         "Risk":         ["stop_loss", "take_profit"],
-        "EMA":          ["ema150", "ema200", "above_ema150", "pct_from_ema"],
+        "SMA":          ["sma150", "sma200", "above_sma150", "pct_from_sma"],
         "RSI":          ["rsi", "signal"],
         "MACD":         ["macd", "signal_line", "histogram", "crossover"],
         "Bollinger":    ["upper", "middle", "lower", "position"],

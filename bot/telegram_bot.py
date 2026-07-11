@@ -94,8 +94,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "buy_score":             "ציון",
         "recommendation":        "המלצה",
         "signals":               "איתותים",
-        "ema_above":             "✅ פתוח",
-        "ema_below":             "❌ סגור",
+        "ma_above":              "✅ פתוח",
+        "ma_below":              "❌ סגור",
         "rsi_oversold":          "מכירת יתר",
         "rsi_overbought":        "קנייה יתר",
         "rsi_neutral":           "ניטרלי",
@@ -222,8 +222,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "buy_score":             "Score",
         "recommendation":        "Recommendation",
         "signals":               "Signals",
-        "ema_above":             "✅ Above",
-        "ema_below":             "❌ Below",
+        "ma_above":              "✅ Above",
+        "ma_below":              "❌ Below",
         "rsi_oversold":          "Oversold",
         "rsi_overbought":        "Overbought",
         "rsi_neutral":           "Neutral",
@@ -353,7 +353,7 @@ def _fmt_analysis(analysis: dict, lang: str = "he") -> str:
     triggered = analysis.get("triggered_signals", [])
     signals_str = "  •  ".join(triggered) if triggered else "—"
 
-    ema_status = s["ema_above"] if analysis["above_ema150"] else s["ema_below"]
+    ma_status = s["ma_above"] if analysis["above_sma150"] else s["ma_below"]
     rsi_label  = {"oversold": s["rsi_oversold"], "overbought": s["rsi_overbought"]}.get(
         analysis["signal"], s["rsi_neutral"]
     )
@@ -372,7 +372,7 @@ def _fmt_analysis(analysis: dict, lang: str = "he") -> str:
         f"\U0001f4ca {s['analysis_title']} {sym} — ${price:,.2f}",
         "",
         _sep(),
-        f"\U0001f6a6 EMA150: ${analysis['ema150']:,.2f} {ema_status}",
+        f"\U0001f6a6 SMA150: ${analysis['sma150']:,.2f} {ma_status}",
         f"\U0001f4c8 RSI: {analysis['rsi']} — {rsi_label}",
         f"\U0001f4c9 MACD: {macd_label}",
         f"\U0001f4ca Bollinger: {bb_label}",
@@ -960,8 +960,8 @@ async def cmd_watchlist_ineligible(update: Update, context: ContextTypes.DEFAULT
 
 
 _OPPORTUNITY_SIGNAL_LABELS: dict[str, str] = {
-    "price_above_ema150":      "EMA150 trend",
-    "ema150_above_ema200":     "EMA150>EMA200",
+    "price_above_sma150":      "SMA150 trend",
+    "sma150_above_sma200":     "SMA150>SMA200",
     "macd_bullish_crossover":  "MACD bull cross",
     "rsi_healthy_range":       "RSI healthy zone",
     "rsi_acceptable_zone":     "RSI acceptable zone",
@@ -1018,12 +1018,12 @@ def _format_watchlist_status(symbol: str, status: dict, explanation: dict | None
             lines += ["", "Live opportunity score unavailable (indicator calculation failed)."]
         else:
             fired = [_OPPORTUNITY_SIGNAL_LABELS[k] for k, v in opp["signals"].items() if v and k in _OPPORTUNITY_SIGNAL_LABELS]
-            ema150_str = f"{opp['ema150']:,.2f}" if opp["ema150"] is not None else "N/A (needs 150+ days history)"
-            ema200_str = f"{opp['ema200']:,.2f}" if opp["ema200"] is not None else "N/A (needs 200+ days history)"
+            sma150_str = f"{opp['sma150']:,.2f}" if opp["sma150"] is not None else "N/A (needs 150+ days history)"
+            sma200_str = f"{opp['sma200']:,.2f}" if opp["sma200"] is not None else "N/A (needs 200+ days history)"
             lines += [
                 "",
                 f"Live opportunity score: {opp['score']}/100 — {opp['verdict']}",
-                f"  RSI: {opp['rsi']}   EMA150: {ema150_str}   EMA200: {ema200_str}",
+                f"  RSI: {opp['rsi']}   SMA150: {sma150_str}   SMA200: {sma200_str}",
                 f"  Signals fired: {', '.join(fired) if fired else 'none'}",
                 f"  Veto: {opp['vetoed'] or 'none'}",
             ]

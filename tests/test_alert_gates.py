@@ -43,7 +43,7 @@ def _analysis(score=80, verdict="STRONG BUY", triggered=None, rsi=55.0) -> dict:
         "verdict": verdict,
         "rsi": rsi,
         "triggered_signals": triggered if triggered is not None
-        else ["price_above_ema150", "rsi_healthy_range", "volume_spike"],
+        else ["price_above_sma150", "rsi_healthy_range", "volume_spike"],
         "stop_loss": 95.0,
         "take_profit": 115.0,
     }
@@ -110,7 +110,7 @@ class TestAlertGates(unittest.TestCase):
         """RSI judgment comes only from triggered_signals — a numerically
         'fine-looking' rsi field must not rescue a missing signal."""
         analysis = _analysis(
-            triggered=["price_above_ema150", "rsi_acceptable_zone", "volume_spike"],
+            triggered=["price_above_sma150", "rsi_acceptable_zone", "volume_spike"],
             rsi=67.0,
         )
         log_alert, _, _ = self._check(analysis)
@@ -118,7 +118,7 @@ class TestAlertGates(unittest.TestCase):
 
     def test_skips_when_volume_spike_signal_missing(self):
         analysis = _analysis(
-            triggered=["price_above_ema150", "rsi_healthy_range"],
+            triggered=["price_above_sma150", "rsi_healthy_range"],
         )
         log_alert, _, _ = self._check(analysis)
         log_alert.assert_not_called()

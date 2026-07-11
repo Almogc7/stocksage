@@ -79,15 +79,15 @@ def compute_liquidity_score(avg_volume: int, avg_price: float) -> float:
 
 
 def compute_trend_score(analysis: dict | None) -> float:
-    """Trend relevance 0.0–1.0. Price above EMA150 and EMA150 above EMA200."""
+    """Trend relevance 0.0–1.0. Price above SMA150 and SMA150 above SMA200."""
     if analysis is None:
         return 0.0
     score = 0.0
-    if analysis.get('above_ema150'):
+    if analysis.get('above_sma150'):
         score += 0.5
-    ema150 = analysis.get('ema150', 0) or 0
-    ema200 = analysis.get('ema200', 0) or 0
-    if ema150 > 0 and ema200 > 0 and ema150 > ema200:
+    sma150 = analysis.get('sma150', 0) or 0
+    sma200 = analysis.get('sma200', 0) or 0
+    if sma150 > 0 and sma200 > 0 and sma150 > sma200:
         score += 0.5
     return score
 

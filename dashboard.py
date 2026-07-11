@@ -132,7 +132,7 @@ with tab2:
 
             with col1:
                 st.markdown("**אינדיקטורים**")
-                st.metric("EMA150", f"${analysis['ema150']:,.2f}", delta=f"{analysis['pct_from_ema']:+.2f}%")
+                st.metric("SMA150", f"${analysis['sma150']:,.2f}", delta=f"{analysis['pct_from_sma']:+.2f}%")
                 st.metric("RSI", f"{analysis['rsi']}", delta=analysis["signal"])
                 st.metric("MACD Crossover", analysis["crossover"])
                 st.metric("Bollinger", analysis["position"])
@@ -169,7 +169,7 @@ with tab2:
                 st.markdown("**גרף — 90 ימים**")
                 chart_df = df.tail(90).copy()
 
-                ema_series = df["close"].ewm(span=150, adjust=False).mean().tail(90)
+                sma_series = df["close"].rolling(window=150).mean().tail(90)
                 bb_mid = df["close"].rolling(20).mean().tail(90)
                 bb_std = df["close"].rolling(20).std().tail(90)
                 bb_upper = bb_mid + 2 * bb_std
@@ -208,8 +208,8 @@ with tab2:
                     ))
 
                 fig.add_trace(go.Scatter(
-                    x=chart_df.index, y=ema_series,
-                    name="EMA150", line=dict(color="#ff9800", width=1.5),
+                    x=chart_df.index, y=sma_series,
+                    name="SMA150", line=dict(color="#ff9800", width=1.5),
                 ))
                 fig.add_trace(go.Scatter(
                     x=chart_df.index, y=bb_upper,

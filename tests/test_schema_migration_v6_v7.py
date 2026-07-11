@@ -287,7 +287,7 @@ class TestSchemaMigrationV6V7(unittest.TestCase):
         n = db.record_scanner_results(run_id, [
             {"symbol": "NVDA", "scanner_name": "momentum_scanner", "passed": True, "score": 90.0},
             {"symbol": "AAPL", "scanner_name": "momentum_scanner", "passed": False, "score": 40.0,
-             "reason": "below EMA150"},
+             "reason": "below SMA150"},
         ])
         self.assertEqual(n, 2)
         results = db.get_scanner_results(run_id)
@@ -311,10 +311,10 @@ class TestSchemaMigrationV6V7(unittest.TestCase):
         run_id = db.create_scanner_run("momentum_scanner")
         db.record_scanner_result(
             run_id, "NVDA", "momentum_scanner", passed=True,
-            details={"triggered_signals": ["price_above_ema150", "volume_spike"]},
+            details={"triggered_signals": ["price_above_sma150", "volume_spike"]},
         )
         results = db.get_scanner_results(run_id)
-        self.assertIn("price_above_ema150", results[0]["details_json"])
+        self.assertIn("price_above_sma150", results[0]["details_json"])
 
     def test_scanner_result_without_run_id_allowed(self):
         """run_id is nullable — a one-off/manual scan result isn't required

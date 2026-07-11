@@ -97,7 +97,7 @@ def _fmt_buy_alert(symbol: str, change_pct: float, price: float, analysis: dict)
         f"{_ALERT_SEP}\n"
         f"\U0001f4b0 מחיר: ${price:,.2f} ({sign}{change_pct:.1f}% היום)\n"
         f"\U0001f4ca ציון: {score}/100 | RSI: {rsi:.1f} ✅\n"
-        f"\U0001f4c8 מעל EMA150 ✅ | נפח גבוה {vol_tag}\n"
+        f"\U0001f4c8 מעל SMA150 ✅ | נפח גבוה {vol_tag}\n"
         f"{signals_str}\n"
         f"\U0001f6d1 Stop: ${analysis['stop_loss']:,.2f} | \U0001f3af TP: ${analysis['take_profit']:,.2f}\n"
         f"⚖️ Risk/Reward: 1:2\n"
@@ -124,8 +124,8 @@ _SCAN_STRINGS: dict[str, dict[str, str]] = {
 }
 
 _SIGNAL_LABELS: dict[str, str] = {
-    "price_above_ema150":     "EMA trend",
-    "ema150_above_ema200":    "EMA200 uptrend",
+    "price_above_sma150":     "SMA trend",
+    "sma150_above_sma200":    "SMA200 uptrend",
     "macd_bullish_crossover": "MACD cross",
     "rsi_healthy_range":      "RSI healthy",
     "rsi_acceptable_zone":    "RSI acceptable",
