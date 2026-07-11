@@ -119,9 +119,6 @@ pip install -r stocksage/requirements.txt
 # Create stocksage/.env with the following content:
 TELEGRAM_TOKEN=your_bot_token_here
 TELEGRAM_CHAT_ID=your_chat_id_here
-ANTHROPIC_API_KEY=your_anthropic_key_here
-ALPHA_VANTAGE_KEY=your_alpha_vantage_key_here
-NEWS_API_KEY=your_news_api_key_here
 ```
 
 **5. Run the application**
@@ -143,9 +140,6 @@ streamlit run stocksage/dashboard.py
 | `TELEGRAM_TOKEN` | Bot token from @BotFather | ✅ Yes |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat/user ID for alert delivery | ✅ Yes |
 | `AUTHORIZED_CHAT_IDS` | Comma-separated chat IDs allowed to issue bot commands (falls back to `TELEGRAM_CHAT_ID` if unset) | Optional |
-| `ANTHROPIC_API_KEY` | Claude AI API key | Optional |
-| `ALPHA_VANTAGE_KEY` | Alpha Vantage key for supplementary data | Optional |
-| `NEWS_API_KEY` | NewsAPI key for sentiment analysis | Optional |
 
 ### Watchlist lifecycle variables (safe defaults — leave unset initially)
 

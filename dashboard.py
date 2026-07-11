@@ -310,12 +310,10 @@ with tab4:
             msg = f"**[{time_str}] {alert['symbol']}** — {alert['message']}"
             atype = alert["alert_type"]
 
-            if atype in ("PRICE_UP", "PRICE_DOWN"):
-                st.info(msg, icon="🚨")
-            elif atype == "STRONG_BUY":
+            # The agent emits only BUY_SIGNAL (agent/core.py:check_alerts);
+            # the generic branch renders any legacy alert types still in the DB.
+            if atype == "BUY_SIGNAL":
                 st.success(msg, icon="🟢")
-            elif atype in ("RSI_OVERSOLD", "RSI_OVERBOUGHT"):
-                st.warning(msg, icon="📊")
             else:
                 st.info(msg)
 

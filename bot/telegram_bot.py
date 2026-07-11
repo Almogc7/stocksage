@@ -11,8 +11,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from agent.core import run_morning_scan
 from analyzers.technical import full_analysis
 from config import (
-    ALERT_COOLDOWN_HOURS, ALERT_THRESHOLD_PCT, AUTHORIZED_CHAT_IDS,
-    CATEGORIES, DEFAULT_LANGUAGE, TELEGRAM_ALLOW_WATCHLIST_APPLY,
+    ALERT_COOLDOWN_HOURS, AUTHORIZED_CHAT_IDS,
+    CATEGORIES, TELEGRAM_ALLOW_WATCHLIST_APPLY,
     WATCHLIST, WATCHLIST_CHANGES_DEFAULT_LIMIT, WATCHLIST_CHANGES_MAX_LIMIT,
 )
 from data.fetcher import get_current_price, get_historical, is_market_open

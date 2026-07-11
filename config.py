@@ -37,13 +37,6 @@ else:
     AUTHORIZED_CHAT_IDS = frozenset()
 
 # ─────────────────────────────────────────────
-#  API Keys
-# ─────────────────────────────────────────────
-ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-
-# ─────────────────────────────────────────────
 #  Watchlist — מחולק לקטגוריות
 # ─────────────────────────────────────────────
 WATCHLIST: dict[str, list[str]] = {
@@ -431,35 +424,8 @@ SCAN_TOP_N: int = 5
 MARKET_OPEN_HOUR_IL: int = 16
 MARKET_OPEN_MIN_IL: int = 35
 
-# התראה אם מניה זזה יותר מ-X% ביום
-ALERT_THRESHOLD_PCT: float = 3.0
-
-# התראה אם מדד זז יותר מ-X% (סף נמוך יותר)
-INDEX_ALERT_THRESHOLD_PCT: float = 1.5
-
 # כמה פעמים בשעה לבדוק (כל 15 דק' = 4 פעמים)
 CHECK_INTERVAL_MINUTES: int = 15
-
-# שעות פעילות (לפי שעון ישראל — שוק אמריקאי פתוח 16:30–23:00)
-MARKET_OPEN_HOUR: int = 16
-MARKET_CLOSE_HOUR: int = 23
-
-# ─────────────────────────────────────────────
-#  הגדרות ניתוח טכני
-# ─────────────────────────────────────────────
-RSI_PERIOD: int = 14
-RSI_OVERSOLD: int = 30      # מתחת → התראת קנייה
-RSI_OVERBOUGHT: int = 70    # מעל   → התראת מכירה
-MACD_FAST: int = 12
-MACD_SLOW: int = 26
-MACD_SIGNAL: int = 9
-
-# ─────────────────────────────────────────────
-#  יומן מסחר
-# ─────────────────────────────────────────────
-TRADE_LOG_DB: str = "db/stocksage.db"
-
-DEFAULT_LANGUAGE: str = "he"
 
 # ─────────────────────────────────────────────
 #  הגדרות גרף
