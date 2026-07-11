@@ -1,18 +1,18 @@
-"""
-Tests for Fix 2: use the last completed daily candle in Gate 9 (green-candle check).
+﻿"""
+Tests for Fix 2: use the last completed daily candle in Gate 7 (green-candle check).
 
 The fix avoids incomplete-bar bias: when the US market is open, yfinance
 includes the current in-progress session as the last row of the daily df.
-Its "close" is the intraday snapshot, not the final 4 PM close. Gate 9
+Its "close" is the intraday snapshot, not the final 4 PM close. Gate 7
 now reads df.iloc[-2] (the previous confirmed close) when the market is open
 and df.iloc[-1] (the last row, which is complete) when the market is closed.
 
 Terminology used in this module:
   - incomplete-bar bias: using an in-progress bar that has not yet closed
   - look-ahead bias: using data that wasn't available at decision time
-  The Gate 9 issue is incomplete-bar bias, not look-ahead bias.
+  The Gate 7 issue is incomplete-bar bias, not look-ahead bias.
 
-No network access — is_market_open() is mocked throughout.
+No network access â€” is_market_open() is mocked throughout.
 """
 
 import unittest
@@ -33,7 +33,7 @@ def _make_df_with_known_last_candles(
     Return a trending DataFrame where:
       - df.iloc[-2] is green or red (controlled by green_second_to_last)
       - df.iloc[-1] is green or red (controlled by green_last)
-    Useful for testing which candle Gate 9 selects.
+    Useful for testing which candle Gate 7 selects.
     """
     df = make_trending_df(n=n)
     df = df.copy()
@@ -62,7 +62,7 @@ def _make_df_with_known_last_candles(
 
 def _green_candle_check(df: pd.DataFrame, market_is_open: bool) -> bool:
     """
-    Replicate the exact candle-selection logic from agent/core.py Gate 9
+    Replicate the exact candle-selection logic from agent/core.py Gate 7
     so tests are self-contained and not coupled to the production import path.
     """
     if market_is_open and len(df) >= 2:
@@ -117,7 +117,7 @@ class TestIncompleteCandleSelection(unittest.TestCase):
             green_second_to_last=False,
             green_last=True,
         )
-        # Simulates weekend: market closed → use last row
+        # Simulates weekend: market closed â†’ use last row
         result = _green_candle_check(df, market_is_open=False)
         self.assertTrue(result)
 
@@ -135,7 +135,7 @@ class TestIncompleteCandleSelection(unittest.TestCase):
 
 class TestProductionCodeUsesCorrectIndex(unittest.TestCase):
     """
-    Verify that the production agent/core.py Gate 9 code passes
+    Verify that the production agent/core.py Gate 7 code passes
     is_market_open() and uses the correct row index.
     These tests mock is_market_open() to control market state.
     """
@@ -143,7 +143,7 @@ class TestProductionCodeUsesCorrectIndex(unittest.TestCase):
     def test_market_open_alert_uses_iloc_minus_2(self):
         """
         When market is open: an alert that would fire based on iloc[-2]
-        (green confirmed candle) should pass Gate 9 even if iloc[-1] is red.
+        (green confirmed candle) should pass Gate 7 even if iloc[-1] is red.
         """
         import inspect
         import agent.core as core_module
@@ -152,11 +152,11 @@ class TestProductionCodeUsesCorrectIndex(unittest.TestCase):
         # Confirm the fix is present: the code must check is_market_open()
         # before deciding which candle index to use.
         self.assertIn("is_market_open()", source,
-            "Gate 9 must call is_market_open() to select the correct candle")
+            "Gate 7 must call is_market_open() to select the correct candle")
         self.assertIn("iloc[-2]", source,
-            "Gate 9 must reference iloc[-2] for market-open scenario")
+            "Gate 7 must reference iloc[-2] for market-open scenario")
         self.assertIn("iloc[-1]", source,
-            "Gate 9 must still reference iloc[-1] for market-closed scenario")
+            "Gate 7 must still reference iloc[-1] for market-closed scenario")
 
     def test_incomplete_bar_bias_terminology_in_comments(self):
         """
@@ -167,7 +167,7 @@ class TestProductionCodeUsesCorrectIndex(unittest.TestCase):
         import agent.core as core_module
         source = inspect.getsource(core_module.check_alerts)
         self.assertIn("incomplete-bar", source.lower(),
-            "Gate 9 comment should mention 'incomplete-bar bias'")
+            "Gate 7 comment should mention 'incomplete-bar bias'")
 
 
 if __name__ == "__main__":

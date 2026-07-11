@@ -14,8 +14,6 @@ from config import (
     ALERT_MIN_PRICE_CHANGE,
     ALERT_MIN_SCORE,
     ALERT_REQUIRE_GREEN_CANDLE,
-    ALERT_RSI_MAX,
-    ALERT_RSI_MIN,
     ALERT_VERDICTS,
     CHECK_INTERVAL_MINUTES,
     MARKET_OPEN_HOUR_IL,
@@ -217,8 +215,20 @@ async def run_morning_scan(bot: Bot, chat_id: str) -> None:
 
 # ── Check routine ─────────────────────────────────────────────────────────────
 
+# triggered_signals entries that MUST be present for an alert to fire.
+# These are full_analysis() outputs — the loop never re-derives RSI/MA/volume
+# thresholds itself (single definition lives in analyzers/technical.py + config).
+_REQUIRED_SIGNALS = ("rsi_healthy_range", "volume_spike")
+
+
 async def check_alerts(bot: Bot, chat_id: str) -> None:
-    """Single unified alert loop — all 9 swing-trade conditions must pass."""
+    """Single unified alert loop — all 7 gates must pass.
+
+    Technical judgment (MA trend, RSI bands, volume) is consumed exclusively
+    from full_analysis()'s score/verdict/triggered_signals; the loop adds only
+    non-analysis gates: price movement, dedup/cooldown, and the completed-bar
+    green-candle confirmation.
+    """
     wl = get_active_watchlist()  # only ACTIVE tier symbols
     all_symbols = [s for symbols in wl.values() for s in symbols]
     if not all_symbols:
@@ -257,11 +267,9 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
         score     = analysis["score"]
         verdict   = analysis["verdict"]
         rsi       = analysis["rsi"]
-        above_ema = analysis["above_ema150"]
         triggered = analysis.get("triggered_signals", [])
-        has_vol   = "volume_spike" in triggered
 
-        # Gate 9 candle selection — incomplete-bar bias avoidance.
+        # Gate 7 candle selection — incomplete-bar bias avoidance.
         #
         # When the US market is open, yfinance includes today's in-progress
         # daily session as the last row of the daily df. Its "close" is the
@@ -282,37 +290,31 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
         last_close = float(ref_candle["close"])
         last_open  = float(ref_candle["open"])
 
-        # Gate 5: price above EMA150
-        if not above_ema:
-            print(f"[ALERT SKIP] {symbol} — price below EMA150")
-            continue
-
-        # Gate 6: RSI in swing-trade zone (not oversold noise, not overbought)
-        if rsi > ALERT_RSI_MAX:
-            print(f"[ALERT SKIP] {symbol} — RSI {rsi:.1f} overbought (max {ALERT_RSI_MAX})")
-            continue
-        if rsi < ALERT_RSI_MIN:
-            print(f"[ALERT SKIP] {symbol} — RSI {rsi:.1f} below minimum ({ALERT_RSI_MIN})")
-            continue
-
-        # Gate 7: volume spike confirms institutional participation
-        if not has_vol:
-            print(f"[ALERT SKIP] {symbol} — no volume spike")
-            continue
-
-        # Gate 8: composite score + verdict
+        # Gate 5: composite score + verdict (full_analysis has already vetoed
+        # below-MA and out-of-band RSI to score 0 / NEUTRAL, so no separate
+        # trend or RSI re-check belongs here)
         if score < ALERT_MIN_SCORE or verdict not in ALERT_VERDICTS:
             print(f"[ALERT SKIP] {symbol} — score={score} verdict={verdict} below threshold")
             continue
 
-        # Gate 9: last candle must be green (momentum confirmation)
+        # Gate 6: required signals — healthy RSI band + volume spike, as
+        # judged by full_analysis itself
+        missing = [sig for sig in _REQUIRED_SIGNALS if sig not in triggered]
+        if missing:
+            print(f"[ALERT SKIP] {symbol} — missing required signals: {', '.join(missing)}")
+            continue
+
+        # Gate 7: last candle must be green (momentum confirmation)
         last_candle_green = last_close > last_open
         if ALERT_REQUIRE_GREEN_CANDLE and not last_candle_green:
             print(f"[ALERT SKIP] {symbol} — last candle red, momentum fading")
             continue
 
-        # All 9 gates passed → fire
-        print(f"[ALERT FIRE] {symbol} score={score} RSI={rsi:.1f} change={change_pct:+.1f}% volume=spike → SENDING")
+        # All 7 gates passed → fire
+        # ASCII-only: a non-encodable char here (e.g. '→') raises
+        # UnicodeEncodeError on Hebrew-codepage Windows consoles and would
+        # kill the tick before the Telegram send.
+        print(f"[ALERT FIRE] {symbol} score={score} RSI={rsi:.1f} change={change_pct:+.1f}% volume=spike -> SENDING")
 
         message = _fmt_buy_alert(symbol, change_pct, price_data["price"], analysis)
 

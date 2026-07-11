@@ -49,9 +49,12 @@ main.py
  │        ├─ data/fetcher.py                  raw yfinance, no retries
  │        ├─ analyzers/technical.py           full_analysis() → opportunity
  │        │                                   score 0–100 + verdict
- │        ├─ 9 alert gates, inline            price move, dedup, cooldown,
- │        │                                   EMA150, RSI band, volume spike,
- │        │                                   score/verdict, green candle
+ │        ├─ 7 alert gates, inline            price move, session dedup,
+ │        │                                   once-per-day DB cooldown, fetch,
+ │        │                                   score/verdict, required signals
+ │        │                                   (rsi_healthy_range+volume_spike),
+ │        │                                   green candle — technical judgment
+ │        │                                   comes ONLY from full_analysis()
  │        └─ send via Telegram + db.log_alert()   (alert_type: BUY_SIGNAL only)
  │   └─ run_morning_scan() once per weekday ~16:35 IL (hand-rolled time check)
  └─ bot/telegram_bot.py  run_polling()        [main thread, blocking, async]
@@ -132,8 +135,12 @@ watchlist membership and tiers — the config dict is only a seed.
 ## Key configuration (`config.py`)
 
 Alerting: `ALERT_MIN_SCORE=65`, `ALERT_VERDICTS=[BUY, STRONG BUY]`,
-`ALERT_MIN_PRICE_CHANGE=0.5`, `ALERT_RSI_MIN/MAX=45/68`,
-`ALERT_REQUIRE_GREEN_CANDLE`, `CHECK_INTERVAL_MINUTES=15`.
+`ALERT_MIN_PRICE_CHANGE=0.5`, `ALERT_REQUIRE_GREEN_CANDLE`,
+`CHECK_INTERVAL_MINUTES=15`.
+RSI bands (single definition, consumed by `analyzers/technical.py`):
+`RSI_VETO_MIN/MAX=35/75`, `RSI_HEALTHY_MIN/MAX=45/65`. The alert loop has
+no RSI thresholds of its own — it requires the `rsi_healthy_range` and
+`volume_spike` entries in `triggered_signals`.
 Alert cooldown is NOT configurable: once per symbol per UTC day, DB-backed
 (`db.was_alerted_today()`, decision D3).
 Morning scan: `SCAN_MIN_SCORE=50`, `SCAN_TOP_N=5`, 16:35 IL trigger.
@@ -142,8 +149,8 @@ hysteresis, eligibility liquidity floors.
 Telegram auth: `AUTHORIZED_CHAT_IDS` allowlist (falls back to
 `TELEGRAM_CHAT_ID`).
 
-Note: RSI/MACD indicator parameters are hardcoded in `analyzers/technical.py`
-(veto <35 / >75, ideal 45–65), not driven by config.
+Note: MACD/Bollinger/ATR/volume-spike parameters remain hardcoded in
+`analyzers/technical.py`; only the RSI bands are config-driven so far.
 
 ## Empty placeholder files
 
@@ -168,10 +175,12 @@ Completed:
 - **Step 3 / D3 (2026-07-11):** single cooldown policy — one alert per
   symbol per UTC day, DB-backed (`was_alerted_today()`); fixed the
   `datetime('now','utc')` double-conversion; `ALERT_COOLDOWN_HOURS` removed.
+- **Step 2 (2026-07-11):** alert loop consumes `full_analysis()` outputs
+  only (7 gates, no duplicate RSI/MA/volume checks); RSI bands unified into
+  config (45–65 healthy, 35/75 veto); `ALERT_RSI_MIN/MAX` (45/68) removed —
+  the 66–68 RSI fringe no longer alerts.
 
 Planned (in order — see audit + `docs/DECISIONS.md`):
-- Step 2 (remaining): unify thresholds into config; alert loop consumes
-  `full_analysis()` outputs only.
 - Step 4: fetch-layer merge onto `MarketDataService` (D2 — Stack C wins).
 - Step 5: all message formatting into `bot/formatters.py`; market calendar
   out of `data/fetcher.py`.
@@ -187,6 +196,6 @@ Planned (in order — see audit + `docs/DECISIONS.md`):
 - `is_market_open()` (in `data/fetcher.py`) ignores US holidays; the
   16:35-IL morning-scan trigger breaks during US/IL DST mismatch weeks.
 - `bot/telegram_bot.py`'s `_rec_emoji` maps verdicts that are never emitted.
-- Incomplete-bar handling is inconsistent: Gate 9 (green candle) uses the
+- Incomplete-bar handling is inconsistent: Gate 7 (green candle) uses the
   last completed candle during market hours, but volume spike / MACD / RSI
   still evaluate the in-progress bar.

@@ -24,7 +24,8 @@ What this module does NOT do (later phases):
   - Schedule anything or send Telegram messages.
 
 Completed-candle rule (documented limitation):
-  Mirrors the existing convention already used by agent/core.py's Gate 9 and
+  Mirrors the existing convention already used by agent/core.py's
+  green-candle gate (Gate 7) and
   tested in tests/test_incomplete_candle.py: when the US market is open, the
   last row of a daily-interval yfinance download is still forming and is
   dropped; when the market is closed, the last row is treated as the most

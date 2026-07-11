@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 import ta
 
+from config import RSI_HEALTHY_MAX, RSI_HEALTHY_MIN, RSI_VETO_MAX, RSI_VETO_MIN
+
 
 def _flatten(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
@@ -285,9 +287,9 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
     # ── Veto gates — hard disqualifiers ──────────────────────────────────────
     if not ema["above_ema150"]:
         return _base_result(0, "NEUTRAL", [])
-    if rsi < 35:
+    if rsi < RSI_VETO_MIN:
         return _base_result(0, "NEUTRAL", [])
-    if rsi > 75:
+    if rsi > RSI_VETO_MAX:
         return _base_result(0, "NEUTRAL", [])
 
     # ── Scoring ───────────────────────────────────────────────────────────────
@@ -308,12 +310,14 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
         score += 20
         triggered.append("macd_bullish_crossover")
 
-    # +15  RSI in ideal swing zone (45–65); +5 if in acceptable fringe (35–44 or 66–75)
-    if 45 <= rsi <= 65:
+    # +15  RSI in ideal swing zone (RSI_HEALTHY_MIN–MAX); +5 in the acceptable
+    #      fringe between the healthy band and the veto bounds
+    if RSI_HEALTHY_MIN <= rsi <= RSI_HEALTHY_MAX:
         score += 15
         triggered.append("rsi_healthy_range")
     else:
-        # fringe zone: 35–44 or 66–75 (veto already blocked < 35 and > 75)
+        # fringe zone between veto and healthy bounds (veto already blocked
+        # rsi < RSI_VETO_MIN and rsi > RSI_VETO_MAX)
         score += 5
         triggered.append("rsi_acceptable_zone")
 

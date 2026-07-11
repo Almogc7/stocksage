@@ -403,9 +403,18 @@ ALERT_VERDICTS: list[str] = ["BUY", "STRONG BUY"]
 # שינוי מחיר מינימלי (חיובי בלבד — רק BUY)
 ALERT_MIN_PRICE_CHANGE: float = 0.5
 
-# טווח RSI תקין לאיתות קנייה (לא מהול מדי / לא מכרז מדי)
-ALERT_RSI_MIN: int = 45
-ALERT_RSI_MAX: int = 68
+# ─────────────────────────────────────────────
+#  ספי RSI — מוזנים ל-analyzers/technical.py
+#  (הגדרה יחידה; לולאת ההתראות צורכת רק את
+#   triggered_signals של full_analysis)
+# ─────────────────────────────────────────────
+# מחוץ לטווח הווטו — פסילה מוחלטת (score 0, NEUTRAL)
+RSI_VETO_MIN: int = 35
+RSI_VETO_MAX: int = 75
+
+# הטווח הבריא לסווינג — מזכה ב"rsi_healthy_range" (תנאי חובה להתראה)
+RSI_HEALTHY_MIN: int = 45
+RSI_HEALTHY_MAX: int = 65
 
 # אישור מומנטום — נר אחרון חייב להיות ירוק (close > open)
 ALERT_REQUIRE_GREEN_CANDLE: bool = True
