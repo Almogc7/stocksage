@@ -350,7 +350,7 @@ class TestSchemaMigrationV6V7(unittest.TestCase):
     def test_existing_alert_and_evaluation_helpers_still_work(self):
         db = self._fresh_db()
         db.log_alert("NVDA", "BUY_SIGNAL", "test message")
-        self.assertTrue(db.was_alerted_recently("NVDA", hours=1))
+        self.assertTrue(db.was_alerted_today("NVDA"))
 
         run_id = db.create_evaluation_run("manual")
         db.update_evaluation_run_success(run_id)

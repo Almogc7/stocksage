@@ -2,7 +2,7 @@ import asyncio
 import io
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import schedule
@@ -11,7 +11,6 @@ from telegram import Bot
 from analyzers.chart_generator import generate_chart_image
 from analyzers.technical import full_analysis
 from config import (
-    ALERT_COOLDOWN_HOURS,
     ALERT_MIN_PRICE_CHANGE,
     ALERT_MIN_SCORE,
     ALERT_REQUIRE_GREEN_CANDLE,
@@ -25,7 +24,7 @@ from config import (
     SCAN_TOP_N,
 )
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
-from db.database import get_active_watchlist, get_language, get_today_alerts, log_alert, was_alerted_recently
+from db.database import get_active_watchlist, get_language, get_today_alerts, log_alert, was_alerted_today
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
 
@@ -34,11 +33,12 @@ _SEP = "━" * 13
 # In-memory dedup guard: "SYMBOL_YYYY-MM-DD" → "HH:MM when alerted"
 # Prevents duplicates within the same process even if the DB write hasn't
 # become visible to a new connection yet (sqlite3 transaction isolation gap).
+# Keyed on the UTC date so it agrees with the DB's once-per-UTC-day policy.
 _alerted_this_session: dict[str, str] = {}
 
 
 def _session_key(symbol: str) -> str:
-    return f"{symbol.upper()}_{datetime.now().strftime('%Y-%m-%d')}"
+    return f"{symbol.upper()}_{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
 
 
 # ── Messaging ─────────────────────────────────────────────────────────────────
@@ -73,8 +73,8 @@ async def send_alert_with_chart(
 # ── Cooldown guard ────────────────────────────────────────────────────────────
 
 def _in_cooldown(symbol: str) -> bool:
-    """True if this symbol was alerted within ALERT_COOLDOWN_HOURS — skip it."""
-    return was_alerted_recently(symbol, hours=ALERT_COOLDOWN_HOURS)
+    """True if this symbol already alerted today (UTC day, D3) — skip it."""
+    return was_alerted_today(symbol)
 
 
 # ── Alert formatter ───────────────────────────────────────────────────────────
@@ -240,12 +240,12 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
         # Gate 2: in-memory dedup — instant, no DB, catches same-cycle dupes
         key = _session_key(symbol)
         if key in _alerted_this_session:
-            print(f"[DUPLICATE SKIP] {symbol} — already alerted at {_alerted_this_session[key]}, cooldown {ALERT_COOLDOWN_HOURS}h")
+            print(f"[DUPLICATE SKIP] {symbol} — already alerted today at {_alerted_this_session[key]}")
             continue
 
-        # Gate 3: DB cooldown — persists across restarts
+        # Gate 3: DB once-per-day cooldown — persists across restarts
         if _in_cooldown(symbol):
-            print(f"[ALERT SKIP] {symbol} — in cooldown ({ALERT_COOLDOWN_HOURS}h)")
+            print(f"[ALERT SKIP] {symbol} — already alerted today")
             continue
 
         # Gate 4: expensive compute — only reached if all cheap gates passed

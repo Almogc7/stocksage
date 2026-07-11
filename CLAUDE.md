@@ -133,8 +133,9 @@ watchlist membership and tiers — the config dict is only a seed.
 
 Alerting: `ALERT_MIN_SCORE=65`, `ALERT_VERDICTS=[BUY, STRONG BUY]`,
 `ALERT_MIN_PRICE_CHANGE=0.5`, `ALERT_RSI_MIN/MAX=45/68`,
-`ALERT_REQUIRE_GREEN_CANDLE`, `ALERT_COOLDOWN_HOURS=2` (see D3 — intended
-policy is once/day; consolidation pending), `CHECK_INTERVAL_MINUTES=15`.
+`ALERT_REQUIRE_GREEN_CANDLE`, `CHECK_INTERVAL_MINUTES=15`.
+Alert cooldown is NOT configurable: once per symbol per UTC day, DB-backed
+(`db.was_alerted_today()`, decision D3).
 Morning scan: `SCAN_MIN_SCORE=50`, `SCAN_TOP_N=5`, 16:35 IL trigger.
 Watchlist lifecycle: `ACTIVE_MAX_SIZE=30`, promotion/demotion thresholds and
 hysteresis, eligibility liquidity floors.
@@ -163,11 +164,14 @@ Completed:
 - **Step 1 — truth pass (2026-07-05):** this rewrite; stale planning docs
   moved to `docs/archive/`; dead config keys and dead dashboard branches
   removed; decisions recorded in `docs/DECISIONS.md`.
+- **D5 (2026-07-11):** `/trade` ATR window aligned 6mo→1y.
+- **Step 3 / D3 (2026-07-11):** single cooldown policy — one alert per
+  symbol per UTC day, DB-backed (`was_alerted_today()`); fixed the
+  `datetime('now','utc')` double-conversion; `ALERT_COOLDOWN_HOURS` removed.
 
 Planned (in order — see audit + `docs/DECISIONS.md`):
-- Step 2: unify thresholds into config; alert loop consumes `full_analysis()`
-  outputs only; fix `/trade`'s 6mo→1y window (D5).
-- Step 3: single once-per-day cooldown policy, DB-backed (D3).
+- Step 2 (remaining): unify thresholds into config; alert loop consumes
+  `full_analysis()` outputs only.
 - Step 4: fetch-layer merge onto `MarketDataService` (D2 — Stack C wins).
 - Step 5: all message formatting into `bot/formatters.py`; market calendar
   out of `data/fetcher.py`.
@@ -180,8 +184,6 @@ Planned (in order — see audit + `docs/DECISIONS.md`):
 - Three fetch layers (`fetcher.py`, `MarketDataClient`, `MarketDataService`)
   and two indicator engines (`technical.py` EMA vs `cached_indicators.py`
   SMA) coexist until steps 4/6.
-- Cooldown mechanisms disagree (D3); suspected SQLite `datetime('now','utc')`
-  double-conversion in `was_alerted_recently()` — needs a frozen-time test.
 - `is_market_open()` (in `data/fetcher.py`) ignores US holidays; the
   16:35-IL morning-scan trigger breaks during US/IL DST mismatch weeks.
 - `bot/telegram_bot.py`'s `_rec_emoji` maps verdicts that are never emitted.

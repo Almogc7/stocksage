@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 _KNOWN_INDICES_MIGRATION: frozenset[str] = frozenset({"^GSPC", "^IXIC", "^DJI", "^RUT", "^VIX"})
@@ -935,34 +935,41 @@ def log_alert(symbol: str, alert_type: str, message: str) -> None:
     with _connect() as conn:
         conn.execute(
             "INSERT INTO alerts (symbol, alert_type, message, triggered_at) VALUES (?, ?, ?, ?)",
-            # Store in SQLite-native UTC format "YYYY-MM-DD HH:MM:SS" (space, not T) so
-            # that datetime('now', 'utc', ...) comparisons work correctly via string
-            # ordering. isoformat() produces a "T" separator which sorts above " " and
-            # would make every stored timestamp appear permanently within cooldown.
+            # Store in SQLite-native UTC format "YYYY-MM-DD HH:MM:SS" (space, not T)
+            # so DATE(triggered_at) and string comparisons against DATE('now') /
+            # datetime('now') work correctly. SQLite's 'now' is already UTC.
             (symbol.upper(), alert_type, message,
              datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
         )
 
 
-def was_alerted_recently(symbol: str, hours: int = 4) -> bool:
-    """True if this symbol has any alert logged within the last `hours` hours."""
+# Cooldown policy (decision D3): one alert per symbol per UTC calendar day.
+# Timestamps are stored in UTC and DATE('now') is UTC, so no timezone
+# modifier is needed. (The old hours-based variant used
+# datetime('now', 'utc', ...), which double-converts — SQLite's 'now' is
+# already UTC, and the 'utc' modifier shifts it again by the machine's
+# local offset, silently stretching the cooldown window.)
+# The whole US session (13:30–21:00 UTC) falls inside one UTC day, so
+# "once per UTC day" is equivalent to "once per trading session".
+
+def was_alerted_today(symbol: str) -> bool:
+    """True if this symbol already has an alert logged today (UTC day)."""
     with _connect() as conn:
         row = conn.execute(
             "SELECT 1 FROM alerts WHERE symbol = ?"
-            " AND triggered_at >= datetime('now', 'utc', ? || ' hours')"
+            " AND DATE(triggered_at) = DATE('now')"
             " LIMIT 1",
-            (symbol.upper(), f"-{hours}"),
+            (symbol.upper(),),
         ).fetchone()
     return row is not None
 
 
-def get_muted_symbols(hours: int = 4) -> list[str]:
-    """Return distinct symbols that have been alerted within the last `hours` hours."""
+def get_muted_symbols() -> list[str]:
+    """Return distinct symbols already alerted today (UTC day)."""
     with _connect() as conn:
         rows = conn.execute(
             "SELECT DISTINCT symbol FROM alerts"
-            " WHERE triggered_at >= datetime('now', 'utc', ? || ' hours')",
-            (f"-{hours}",),
+            " WHERE DATE(triggered_at) = DATE('now')",
         ).fetchall()
     return [row["symbol"] for row in rows]
 
@@ -988,11 +995,12 @@ def set_language(chat_id: str, lang: str) -> None:
 
 
 def get_today_alerts() -> list[dict]:
-    today = date.today().isoformat()
+    # Same UTC-day boundary as was_alerted_today()/get_muted_symbols(), so
+    # "alerts today" and "muted today" can never disagree.
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM alerts WHERE DATE(triggered_at) = ? ORDER BY triggered_at DESC",
-            (today,),
+            "SELECT * FROM alerts WHERE DATE(triggered_at) = DATE('now')"
+            " ORDER BY triggered_at DESC",
         ).fetchall()
     return [dict(row) for row in rows]
 

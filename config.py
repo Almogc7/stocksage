@@ -394,8 +394,8 @@ WATCHLIST: dict[str, list[str]] = {
 # ציון מינימלי לשליחת התראה (swing trading — BUY ומעלה)
 ALERT_MIN_SCORE: int = 65
 
-# שעות המתנה בין התראות על אותה מניה
-ALERT_COOLDOWN_HOURS: int = 2
+# מדיניות cooldown (D3): התראה אחת לכל מניה ליום (UTC) — קבוע במסד הנתונים
+# (db.was_alerted_today), לא ניתן להגדרה.
 
 # רק verdict אלה יגרמו לשליחת התראה
 ALERT_VERDICTS: list[str] = ["BUY", "STRONG BUY"]

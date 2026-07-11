@@ -11,7 +11,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from agent.core import run_morning_scan
 from analyzers.technical import full_analysis
 from config import (
-    ALERT_COOLDOWN_HOURS, AUTHORIZED_CHAT_IDS,
+    AUTHORIZED_CHAT_IDS,
     CATEGORIES, TELEGRAM_ALLOW_WATCHLIST_APPLY,
     WATCHLIST, WATCHLIST_CHANGES_DEFAULT_LIMIT, WATCHLIST_CHANGES_MAX_LIMIT,
 )
@@ -143,7 +143,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "market_closed_weekend": "\U0001f534 השוק סגור — סוף שבוע",
         "market_closed_hours":   "\U0001f534 השוק סגור — נפתח ב-16:30",
         "alerts_active_today":   "התראות פעילות היום",
-        "muted_label":           "ממתינות (cooldown {hours}h)",
+        "muted_label":           "הותרעו כבר היום",
         "none_label":            "אין",
         "market_status_open":    "\U0001f7e2 השוק פתוח",
         "market_status_closed":  "\U0001f534 השוק סגור",
@@ -271,7 +271,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "market_closed_weekend": "\U0001f534 Market closed — weekend",
         "market_closed_hours":   "\U0001f534 Market closed — opens at 09:30 EST",
         "alerts_active_today":   "Active alerts today",
-        "muted_label":           "Muted (last {hours}h)",
+        "muted_label":           "Already alerted today",
         "none_label":            "None",
         "market_status_open":    "\U0001f7e2 Market is open",
         "market_status_closed":  "\U0001f534 Market is closed",
@@ -857,10 +857,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         vix_line = f"\U0001f321 VIX: {vix_data['price']} ({sign}{vix_data['change_pct']}%)\n"
 
     alerts_today = get_today_alerts()
-    muted        = get_muted_symbols(ALERT_COOLDOWN_HOURS)
+    muted        = get_muted_symbols()
     muted_str    = ", ".join(muted) if muted else s["none_label"]
     alert_line   = f"\U0001f514 {s['alerts_active_today']}: {len(alerts_today)}\n"
-    muted_line   = f"\U0001f4f5 {s['muted_label'].format(hours=ALERT_COOLDOWN_HOURS)}: {muted_str}"
+    muted_line   = f"\U0001f4f5 {s['muted_label']}: {muted_str}"
 
     text = (
         f"{s['status_title']}\n\n"
