@@ -95,6 +95,13 @@ main.py
 
 ```
 services/watchlist_scheduler.py               17:30 ET, holiday-aware
+ │   (library + CLI only — nothing in main.py starts it. Since 2026-07-12
+ │    the Windows task "StockSage Watchlist Evaluation" runs
+ │    scripts/run_watchlist_evaluation.cmd nightly at 02:30 IL →
+ │    dry_run_evaluation.py --scheduled-apply --yes: APPLY mode with all
+ │    guards (market-day / 17:30-ET / once-per-day / concurrency). Log:
+ │    logs/watchlist_evaluation_task.log. WATCHLIST_SCHEDULE_APPLY stays
+ │    false — apply intent lives in the task, not a global default.)
  └─ services/watchlist_evaluator.py           dry-run by default; apply is
       ├─ data/market_data_validator.py        gated (env + "confirm" word)
       │    MarketDataClient — its own yfinance client with retries,
