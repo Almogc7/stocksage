@@ -36,6 +36,10 @@ python scripts/run_composite_scan.py [SYMBOL ...]
 # Nightly alert-outcome population (run after US close via cron/Task
 # Scheduler; writes ONLY alert_outcomes, idempotent, partial fills OK)
 python scripts/populate_outcomes.py
+
+# Advisory stop/exit check for one open LONG position (live fetch, no DB,
+# no execution; prints recommended stop + exit signals)
+python scripts/run_position_check.py SYMBOL ENTRY_PRICE ENTRY_DATE [--stop S] [--score N] [--prev-stop P]
 ```
 
 **Testing rule: never run tests or smoke tests against the real
@@ -133,6 +137,17 @@ deliberately has NO RSI veto (unlike `full_analysis()`) and computes on
 completed bars only, except session-normalized relative volume which
 measures the live bar. Indicator math reuses the exact `ta` calls and
 parameters from `analyzers/technical.py`.
+
+`analyzers/position_management.py` — advisory trailing-stop/exit module for
+open LONG positions, on top of the composite engine's stop sizing (imports
+`_stop_multiplier` and `_completed_bars`; never recomputes the 2.0–3.0x
+bands). Staged policy: <1R initial stop, ≥1R breakeven, >1.5R Chandelier
+(3.0x ATR, 2.5x when exit signals fire), monotonically non-decreasing via a
+caller-supplied `previous_stop` (the module is stateless — position state
+lives with the caller). Three advisory exit flags (bearish RSI divergence,
+climax volume, RSI≥80), partial-exit suggestion at ≥2R, `stop_breached`
+detection. Completed bars only. NOT wired into alerting/execution — CLI
+only (`scripts/run_position_check.py`).
 
 ### Stack D — Dashboard (separate process)
 
