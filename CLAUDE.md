@@ -32,6 +32,10 @@ python scripts/run_strong_trend_scan.py
 # Composite-vs-legacy score comparison across the ACTIVE tier (live fetch,
 # read-only DB; the composite engine is NOT wired into alerting)
 python scripts/run_composite_scan.py [SYMBOL ...]
+
+# Nightly alert-outcome population (run after US close via cron/Task
+# Scheduler; writes ONLY alert_outcomes, idempotent, partial fills OK)
+python scripts/populate_outcomes.py
 ```
 
 **Testing rule: never run tests or smoke tests against the real
@@ -147,8 +151,19 @@ Python's 150/200 lines are SMA-aligned as of 2026-07-11 (step 6 done).
 SQLite at `db/stocksage.db`, managed entirely via `db/database.py` (~1,450
 lines; all schema changes are additive+idempotent in `migrate_db()`).
 Tables: `watchlist` (with lifecycle columns), `trades`, `alerts`,
-`user_preferences`, `symbol_categories`, `evaluation_runs`,
-`evaluation_run_changes`, `stock_prices`, `scanner_runs`, `scanner_results`.
+`alert_signals` (1:1 structured snapshot per alert: score/verdict/price/
+RSI/ATR/stop/TP + triggered_signals JSON; written by `log_alert()` when an
+analysis dict is passed), `alert_outcomes` (1:1 post-alert performance —
+T+1/3/5/10 closes, MAE %, first_barrier_hit, r_multiple; populated offline
+by `scripts/populate_outcomes.py`, which must be scheduled externally —
+nothing in the live app runs it. Trading days are counted from fetched
+bars, T+0 excluded, stop assumed first on both-barrier days, MAE measured
+through the exit bar — semantics documented in the script header),
+`user_preferences`, `symbol_categories`,
+`evaluation_runs`, `evaluation_run_changes`, `stock_prices`, `scanner_runs`,
+`scanner_results`.
+`price_at_alert` in `alert_signals` is the live fetcher price passed
+explicitly — never `analysis["current_price"]` (see known inconsistencies).
 
 `populate_from_config()` seeds the watchlist from `config.py`'s `WATCHLIST`
 dict on startup; after seeding, **the DB is the source of truth** for

@@ -359,7 +359,10 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
 
         # Mark in-memory first so next symbol sees the guard before DB settles
         _alerted_this_session[key] = datetime.now().strftime("%H:%M")
-        log_alert(symbol, "BUY_SIGNAL", message)
+        # price_at_alert is the live fetcher price, NOT analysis["current_price"]
+        # (that key is silently overwritten with the last close — see CLAUDE.md)
+        log_alert(symbol, "BUY_SIGNAL", message,
+                  analysis=analysis, price_at_alert=price_data["price"])
         logger.info("[agent] Alert sent: %s score=%s RSI=%.1f", symbol, score, rsi)
 
 

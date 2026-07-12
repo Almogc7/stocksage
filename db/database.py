@@ -105,6 +105,18 @@ def migrate_db() -> None:
       evaluation_runs).
       scanner_results — one row per (run, symbol) scan outcome, mirrors
       evaluation_run_changes' per-symbol-detail shape.
+
+    New tables in v8 (structured alert data):
+      alert_signals — 1:1 satellite of alerts holding the structured
+      analysis snapshot at fire time (score, verdict, price, RSI, ATR,
+      stop/TP, triggered_signals JSON). Written by log_alert() when an
+      analysis dict is supplied; the alerts table itself is unchanged so
+      all cooldown/dedup queries are unaffected.
+      alert_outcomes — 1:1 satellite for post-alert performance
+      measurement (T+1/3/5/10 closes, max adverse excursion %,
+      first_barrier_hit, r_multiple). Schema only for now: nothing writes
+      it yet — a future population job fills rows once enough trading
+      days have elapsed after each alert.
     """
     with _connect() as conn:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()}
@@ -291,6 +303,48 @@ def migrate_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_scanner_results_symbol_scanner_scanned"
             " ON scanner_results(symbol, scanner_name, scanned_at)"
         )
+
+        # v8 tables — structured per-alert data. alert_id INTEGER PRIMARY KEY
+        # enforces the 1:1 relationship with alerts. The REFERENCES clauses
+        # are documentation only: this codebase never enables
+        # PRAGMA foreign_keys (consistent with every other table), and
+        # nothing ever deletes from alerts.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_signals (
+                alert_id          INTEGER PRIMARY KEY REFERENCES alerts(id),
+                score             INTEGER NOT NULL,
+                verdict           TEXT    NOT NULL,
+                price_at_alert    REAL    NOT NULL,
+                rsi               REAL,
+                atr               REAL,
+                stop_loss         REAL,
+                take_profit       REAL,
+                triggered_signals TEXT    NOT NULL DEFAULT '[]'
+            )
+        """)
+
+        # Outcome semantics (population job is future work — see log_alert):
+        #   close_tN              close N TRADING days after the alert
+        #   max_adverse_excursion worst % drawdown vs price_at_alert within
+        #                         the 10-trading-day window (negative or 0)
+        #   first_barrier_hit     which of the stored stop_loss/take_profit
+        #                         levels was touched first within the window
+        #   r_multiple            (exit - entry) / (entry - stop_loss)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_outcomes (
+                alert_id              INTEGER PRIMARY KEY REFERENCES alerts(id),
+                close_t1              REAL,
+                close_t3              REAL,
+                close_t5              REAL,
+                close_t10             REAL,
+                max_adverse_excursion REAL,
+                first_barrier_hit     TEXT CHECK(
+                    first_barrier_hit IN ('stop_loss', 'take_profit', 'none')
+                ),
+                r_multiple            REAL,
+                computed_at           TIMESTAMP
+            )
+        """)
 
         # v2 table
         conn.execute("""
@@ -931,15 +985,118 @@ def get_trade_summary(symbol: str) -> dict:
 
 # ── Alerts ───────────────────────────────────────────────────────────────────
 
-def log_alert(symbol: str, alert_type: str, message: str) -> None:
+def log_alert(
+    symbol: str,
+    alert_type: str,
+    message: str,
+    analysis: dict | None = None,
+    price_at_alert: float | None = None,
+) -> int:
+    """Insert an alert row and return its id.
+
+    When `analysis` (a full_analysis() result dict) is supplied, a 1:1
+    alert_signals row is written in the same transaction with the
+    structured snapshot: score, verdict, RSI, ATR, stop/TP, and
+    triggered_signals serialized as a JSON array.
+
+    `price_at_alert` should be the LIVE price from the fetcher
+    (price_data["price"]), passed explicitly because
+    analysis["current_price"] is silently overwritten with the last close
+    by _base_result()'s dict-spread ordering (known inconsistency in
+    CLAUDE.md) — falling back to it only if no live price is given.
+    """
     with _connect() as conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO alerts (symbol, alert_type, message, triggered_at) VALUES (?, ?, ?, ?)",
             # Store in SQLite-native UTC format "YYYY-MM-DD HH:MM:SS" (space, not T)
             # so DATE(triggered_at) and string comparisons against DATE('now') /
             # datetime('now') work correctly. SQLite's 'now' is already UTC.
             (symbol.upper(), alert_type, message,
              datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        alert_id = cur.lastrowid
+        if analysis is not None:
+            price = price_at_alert if price_at_alert is not None else analysis.get("current_price")
+            conn.execute(
+                """INSERT INTO alert_signals
+                   (alert_id, score, verdict, price_at_alert, rsi, atr,
+                    stop_loss, take_profit, triggered_signals)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    alert_id,
+                    analysis["score"],
+                    analysis["verdict"],
+                    price,
+                    analysis.get("rsi"),
+                    analysis.get("atr"),
+                    analysis.get("stop_loss"),
+                    analysis.get("take_profit"),
+                    json.dumps(analysis.get("triggered_signals", [])),
+                ),
+            )
+    return alert_id
+
+
+def get_alerts_pending_outcomes() -> list[dict]:
+    """Alert-signal rows whose outcome row is missing or incomplete.
+
+    A row is COMPLETE once close_t10 is non-NULL (10 trading days of bars
+    existed when it was computed — every other field is derivable by then).
+    Complete rows are never reselected, which is what makes the nightly
+    population job (scripts/populate_outcomes.py) idempotent.
+
+    alert_date is the UTC date of triggered_at, which equals the ET trading
+    date because the whole US session falls inside one UTC day (see the D3
+    comment above was_alerted_today()).
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT a.id AS alert_id, a.symbol,
+                      DATE(a.triggered_at) AS alert_date,
+                      s.price_at_alert, s.stop_loss, s.take_profit
+               FROM alert_signals s
+               JOIN alerts a ON a.id = s.alert_id
+               LEFT JOIN alert_outcomes o ON o.alert_id = s.alert_id
+               WHERE o.alert_id IS NULL OR o.close_t10 IS NULL
+               ORDER BY a.triggered_at""",
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def upsert_alert_outcome(alert_id: int, outcome: dict) -> None:
+    """Insert or fully replace the outcome row for one alert.
+
+    Whole-row upsert on the alert_id primary key: the population job
+    recomputes incomplete rows from price history on every run (a
+    deterministic function of the bars), so replacing the row wholesale can
+    never duplicate or corrupt state. computed_at is stamped on every write.
+    """
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO alert_outcomes
+               (alert_id, close_t1, close_t3, close_t5, close_t10,
+                max_adverse_excursion, first_barrier_hit, r_multiple, computed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(alert_id) DO UPDATE SET
+                 close_t1              = excluded.close_t1,
+                 close_t3              = excluded.close_t3,
+                 close_t5              = excluded.close_t5,
+                 close_t10             = excluded.close_t10,
+                 max_adverse_excursion = excluded.max_adverse_excursion,
+                 first_barrier_hit     = excluded.first_barrier_hit,
+                 r_multiple            = excluded.r_multiple,
+                 computed_at           = excluded.computed_at""",
+            (
+                alert_id,
+                outcome.get("close_t1"),
+                outcome.get("close_t3"),
+                outcome.get("close_t5"),
+                outcome.get("close_t10"),
+                outcome.get("max_adverse_excursion"),
+                outcome.get("first_barrier_hit"),
+                outcome.get("r_multiple"),
+                _utc_now_str(),
+            ),
         )
 
 
