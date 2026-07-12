@@ -1,5 +1,8 @@
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger("stocksage.bot")
 
 _ET = ZoneInfo("America/New_York")
 
@@ -54,15 +57,15 @@ async def _check_auth(update: Update) -> bool:
     to TELEGRAM_CHAT_ID for single-user personal bots.
 
     If no authorized IDs are configured at all, every request is rejected
-    (fail-secure). Unauthorized attempts are logged to stdout without
-    exposing message content or the bot token.
+    (fail-secure). Unauthorized attempts are logged without exposing message
+    content or the bot token.
     """
     if not AUTHORIZED_CHAT_IDS:
-        print(f"[AUTH BLOCK] No AUTHORIZED_CHAT_IDS configured — rejecting all commands")
+        logger.warning("[AUTH BLOCK] No AUTHORIZED_CHAT_IDS configured -- rejecting all commands")
         return False
     chat_id = str(update.effective_chat.id)
     if chat_id not in AUTHORIZED_CHAT_IDS:
-        print(f"[AUTH BLOCK] Unauthorized command from chat_id={chat_id}")
+        logger.warning("[AUTH BLOCK] Unauthorized command from chat_id=%s", chat_id)
         return False
     return True
 
@@ -447,7 +450,7 @@ async def _send(update: Update, text: str) -> None:
         try:
             await update.message.reply_text(chunk)
         except BadRequest as exc:
-            print(f"[telegram] BadRequest sending message: {exc}")
+            logger.warning("[telegram] BadRequest sending message: %s", exc)
             try:
                 await update.message.reply_text(
                     "⚠️ Message too long to display. Try a more specific command "
@@ -826,7 +829,7 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lang = get_language(str(update.effective_chat.id))
     s = STRINGS[lang]
     text = f"✅ {s['test_msg']} — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    print(f"[TELEGRAM OK] /test confirmed delivery to chat_id={update.effective_chat.id}")
+    logger.info("[TELEGRAM OK] /test confirmed delivery to chat_id=%s", update.effective_chat.id)
     await _send(update, text)
 
 
@@ -1053,7 +1056,7 @@ async def cmd_watchlist_status(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         explanation = explain_symbol(symbol)
     except Exception as exc:
-        print(f"[watchlist_status] explain_symbol failed for {symbol}: {type(exc).__name__}")
+        logger.error("[watchlist_status] explain_symbol failed for %s: %s", symbol, type(exc).__name__)
         explanation = None
 
     await _send(update, _format_watchlist_status(symbol, status, explanation))
@@ -1163,7 +1166,7 @@ async def cmd_refresh_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         result = run_watchlist_evaluation(apply=apply_mode, triggered_by="telegram")
     except Exception as exc:  # never show a raw exception/stack trace to the user
-        print(f"[refresh_watchlist] unexpected error: {type(exc).__name__}")
+        logger.error("[refresh_watchlist] unexpected error: %s", type(exc).__name__)
         await _send(update, "⚠️ Watchlist refresh failed unexpectedly. Check server logs.")
         return
 
@@ -1325,7 +1328,19 @@ async def _register_bot_commands(application) -> None:
     try:
         await application.bot.set_my_commands(_BOT_COMMANDS)
     except Exception as exc:
-        print(f"[telegram] Failed to register command menu: {type(exc).__name__}")
+        logger.warning("[telegram] Failed to register command menu: %s", type(exc).__name__)
+
+
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Global python-telegram-bot error handler: any exception escaping a
+    command handler (or PTB's own polling machinery) lands here and gets
+    logged with a full traceback instead of being silently swallowed.
+
+    Deliberately does NOT log the update payload — it contains chat IDs and
+    message text; the traceback alone is the forensic record we need.
+    """
+    logger.error("Unhandled exception in bot handler", exc_info=context.error)
 
 
 def run_bot(token: str) -> None:
@@ -1333,6 +1348,7 @@ def run_bot(token: str) -> None:
     run_initial_classification(WATCHLIST)
 
     app = ApplicationBuilder().token(token).post_init(_register_bot_commands).build()
+    app.add_error_handler(_on_error)
 
     app.add_handler(CommandHandler("start",                cmd_start))
     app.add_handler(CommandHandler("help",                 cmd_help))

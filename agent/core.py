@@ -1,7 +1,9 @@
 import asyncio
 import io
+import logging
 import threading
 import time
+import urllib.request
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -16,6 +18,7 @@ from config import (
     ALERT_REQUIRE_GREEN_CANDLE,
     ALERT_VERDICTS,
     CHECK_INTERVAL_MINUTES,
+    HEALTHCHECK_PING_URL,
     MARKET_OPEN_HOUR_IL,
     MARKET_OPEN_MIN_IL,
     SCAN_MIN_SCORE,
@@ -23,6 +26,8 @@ from config import (
 )
 from data.fetcher import get_current_price, get_historical, get_multiple_prices, is_market_open
 from db.database import get_active_watchlist, get_language, get_today_alerts, log_alert, was_alerted_today
+
+logger = logging.getLogger("stocksage.agent")
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
 
@@ -43,29 +48,35 @@ def _session_key(symbol: str) -> str:
 
 async def send_alert(bot: Bot, chat_id: str, message: str, symbol: str = "") -> None:
     label = f" [{symbol}]" if symbol else ""
-    print(f"[ALERT FIRE]{label} Attempting Telegram send to chat_id={chat_id}")
+    logger.info("[ALERT FIRE]%s Attempting Telegram send to chat_id=%s", label, chat_id)
     try:
         await bot.send_message(chat_id=chat_id, text=message)
-        print(f"[TELEGRAM OK]{label} Message delivered successfully")
+        logger.info("[TELEGRAM OK]%s Message delivered successfully", label)
     except Exception as e:
-        print(f"[TELEGRAM ERROR]{label} {type(e).__name__}: {e}")
+        logger.error("[TELEGRAM ERROR]%s %s: %s", label, type(e).__name__, e)
 
 
 async def send_alert_with_chart(
     bot: Bot, chat_id: str, caption: str, image_bytes: bytes, symbol: str = ""
 ) -> None:
     label = f" [{symbol}]" if symbol else ""
-    print(f"[ALERT FIRE]{label} Attempting Telegram send_photo to chat_id={chat_id}")
+    logger.info("[ALERT FIRE]%s Attempting Telegram send_photo to chat_id=%s", label, chat_id)
     try:
         await bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_bytes), caption=caption)
-        print(f"[TELEGRAM OK]{label} Photo delivered successfully")
+        logger.info("[TELEGRAM OK]%s Photo delivered successfully", label)
     except Exception as e:
-        print(f"[TELEGRAM ERROR]{label} send_photo failed: {type(e).__name__}: {e} — falling back to text")
+        logger.error(
+            "[TELEGRAM ERROR]%s send_photo failed: %s: %s -- falling back to text",
+            label, type(e).__name__, e,
+        )
         try:
             await bot.send_message(chat_id=chat_id, text=caption)
-            print(f"[TELEGRAM OK]{label} Fallback text delivered")
+            logger.info("[TELEGRAM OK]%s Fallback text delivered", label)
         except Exception as e2:
-            print(f"[TELEGRAM ERROR]{label} Fallback also failed: {type(e2).__name__}: {e2}")
+            logger.error(
+                "[TELEGRAM ERROR]%s Fallback also failed: %s: %s",
+                label, type(e2).__name__, e2,
+            )
 
 
 # ── Cooldown guard ────────────────────────────────────────────────────────────
@@ -170,25 +181,25 @@ async def send_morning_scan(bot: Bot, chat_id: str, results: list[dict], lang: s
         message = f"\U0001f305 {_SCAN_STRINGS[lang]['no_results']}"
     else:
         message = _fmt_morning_scan(results, lang)
-    print(f"[SCAN] Sending morning scan ({len(results)} results) to chat_id={chat_id}")
+    logger.info("[SCAN] Sending morning scan (%d results) to chat_id=%s", len(results), chat_id)
     try:
         await bot.send_message(chat_id=chat_id, text=message)
-        print(f"[SCAN OK] Morning scan delivered")
+        logger.info("[SCAN OK] Morning scan delivered")
     except Exception as e:
-        print(f"[SCAN ERROR] {type(e).__name__}: {e}")
+        logger.error("[SCAN ERROR] %s: %s", type(e).__name__, e)
 
 
 _SCAN_SKIP_CATEGORIES = {"מדדים", "ETFs"}
 
 
 async def run_morning_scan(bot: Bot, chat_id: str) -> None:
-    print(f"[SCAN] Starting morning scan across active watchlist...")
+    logger.info("[SCAN] Starting morning scan across active watchlist...")
     wl = get_active_watchlist()  # only ACTIVE tier symbols
 
     # Build eligible symbol list from ACTIVE tier
     # (ETFs/indices are in ETF_INDEX_CONTEXT state and never appear here)
     eligible = [s for symbols in wl.values() for s in symbols]
-    print(f"[SCAN] {len(eligible)} eligible symbols in Active tier")
+    logger.info("[SCAN] %d eligible symbols in Active tier", len(eligible))
 
     results: list[dict] = []
     for symbol in eligible:
@@ -203,13 +214,16 @@ async def run_morning_scan(bot: Bot, chat_id: str) -> None:
             if analysis["score"] >= SCAN_MIN_SCORE:
                 results.append(analysis)
         except Exception as e:
-            print(f"[SCAN SKIP] {symbol}: {type(e).__name__}: {e}")
+            logger.warning("[SCAN SKIP] %s: %s: %s", symbol, type(e).__name__, e)
             continue
 
     results.sort(key=lambda x: x["score"], reverse=True)
     top = results[:SCAN_TOP_N]
     lang = get_language(chat_id)
-    print(f"[SCAN] {len(results)} qualifying symbols found, sending top {len(top)} (lang={lang})")
+    logger.info(
+        "[SCAN] %d qualifying symbols found, sending top %d (lang=%s)",
+        len(results), len(top), lang,
+    )
     await send_morning_scan(bot, chat_id, top, lang=lang)
 
 
@@ -243,19 +257,26 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
         change_pct = price_data["change_pct"]
 
         # Gate 1: positive price movement ≥ ALERT_MIN_PRICE_CHANGE (BUY only)
+        # DEBUG: fires for most symbols every tick — file log only, no console
         if change_pct < ALERT_MIN_PRICE_CHANGE:
-            print(f"[ALERT SKIP] {symbol} — price change {change_pct:+.1f}% below threshold {ALERT_MIN_PRICE_CHANGE}%")
+            logger.debug(
+                "[ALERT SKIP] %s -- price change %+.1f%% below threshold %s%%",
+                symbol, change_pct, ALERT_MIN_PRICE_CHANGE,
+            )
             continue
 
         # Gate 2: in-memory dedup — instant, no DB, catches same-cycle dupes
         key = _session_key(symbol)
         if key in _alerted_this_session:
-            print(f"[DUPLICATE SKIP] {symbol} — already alerted today at {_alerted_this_session[key]}")
+            logger.info(
+                "[DUPLICATE SKIP] %s -- already alerted today at %s",
+                symbol, _alerted_this_session[key],
+            )
             continue
 
         # Gate 3: DB once-per-day cooldown — persists across restarts
         if _in_cooldown(symbol):
-            print(f"[ALERT SKIP] {symbol} — already alerted today")
+            logger.info("[ALERT SKIP] %s -- already alerted today", symbol)
             continue
 
         # Gate 4: expensive compute — only reached if all cheap gates passed
@@ -294,27 +315,36 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
         # below-MA and out-of-band RSI to score 0 / NEUTRAL, so no separate
         # trend or RSI re-check belongs here)
         if score < ALERT_MIN_SCORE or verdict not in ALERT_VERDICTS:
-            print(f"[ALERT SKIP] {symbol} — score={score} verdict={verdict} below threshold")
+            logger.info(
+                "[ALERT SKIP] %s -- score=%s verdict=%s below threshold",
+                symbol, score, verdict,
+            )
             continue
 
         # Gate 6: required signals — healthy RSI band + volume spike, as
         # judged by full_analysis itself
         missing = [sig for sig in _REQUIRED_SIGNALS if sig not in triggered]
         if missing:
-            print(f"[ALERT SKIP] {symbol} — missing required signals: {', '.join(missing)}")
+            logger.info(
+                "[ALERT SKIP] %s -- missing required signals: %s",
+                symbol, ", ".join(missing),
+            )
             continue
 
         # Gate 7: last candle must be green (momentum confirmation)
         last_candle_green = last_close > last_open
         if ALERT_REQUIRE_GREEN_CANDLE and not last_candle_green:
-            print(f"[ALERT SKIP] {symbol} — last candle red, momentum fading")
+            logger.info("[ALERT SKIP] %s -- last candle red, momentum fading", symbol)
             continue
 
         # All 7 gates passed → fire
-        # ASCII-only: a non-encodable char here (e.g. '→') raises
-        # UnicodeEncodeError on Hebrew-codepage Windows consoles and would
-        # kill the tick before the Telegram send.
-        print(f"[ALERT FIRE] {symbol} score={score} RSI={rsi:.1f} change={change_pct:+.1f}% volume=spike -> SENDING")
+        # ASCII-only log messages: the console handler on Hebrew-codepage
+        # Windows can't encode chars like '→' (logging drops the line for
+        # that handler instead of crashing, but the console trace is lost).
+        logger.info(
+            "[ALERT FIRE] %s score=%s RSI=%.1f change=%+.1f%% volume=spike -> SENDING",
+            symbol, score, rsi, change_pct,
+        )
 
         message = _fmt_buy_alert(symbol, change_pct, price_data["price"], analysis)
 
@@ -324,25 +354,50 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
             caption = message if len(message) <= 1024 else message[:1021] + "..."
             await send_alert_with_chart(bot, chat_id, caption, chart_bytes, symbol=symbol)
         else:
-            print(f"[CHART FAIL] {symbol} — sending text alert only")
+            logger.warning("[CHART FAIL] %s -- sending text alert only", symbol)
             await send_alert(bot, chat_id, message, symbol=symbol)
 
         # Mark in-memory first so next symbol sees the guard before DB settles
         _alerted_this_session[key] = datetime.now().strftime("%H:%M")
         log_alert(symbol, "BUY_SIGNAL", message)
-        print(f"[agent] Alert sent: {symbol} score={score} RSI={rsi:.1f}")
+        logger.info("[agent] Alert sent: %s score=%s RSI=%.1f", symbol, score, rsi)
+
+
+# ── Dead-man's switch ─────────────────────────────────────────────────────────
+
+def _ping_healthcheck() -> None:
+    """GET the configured monitoring URL (healthchecks.io style).
+
+    Called at the end of every SUCCESSFUL run_checks() cycle — market open or
+    closed — so the signal means "the scheduler daemon is alive and cycling",
+    not "the market was scanned". If cycles start failing (the exception path
+    in job() skips the ping) or the thread dies, pings stop and the monitoring
+    service raises the alarm. No-op when HEALTHCHECK_PING_URL is unset.
+    Failures here are logged and swallowed — monitoring must never break the
+    alert loop.
+    """
+    if not HEALTHCHECK_PING_URL:
+        return
+    try:
+        with urllib.request.urlopen(HEALTHCHECK_PING_URL, timeout=10):
+            pass
+        logger.debug("[healthcheck] ping OK")
+    except Exception as e:
+        logger.warning("[healthcheck] ping failed: %s: %s", type(e).__name__, e)
 
 
 async def run_checks(bot: Bot, chat_id: str) -> None:
     market_open = is_market_open()
-    print(f"[agent] {datetime.now().strftime('%H:%M:%S')} — market_open={market_open}")
-    if not market_open:
-        print(f"[agent] Market closed (US 9:30–16:00 ET), skipping checks.")
-        return
-
-    print(f"[agent] {datetime.now().strftime('%H:%M:%S')} — running checks...")
-    await check_alerts(bot, chat_id)
-    print(f"[agent] {datetime.now().strftime('%H:%M:%S')} — checks complete.")
+    logger.info("[agent] market_open=%s", market_open)
+    if market_open:
+        logger.info("[agent] running checks...")
+        await check_alerts(bot, chat_id)
+        logger.info("[agent] checks complete.")
+    else:
+        logger.info("[agent] Market closed (US 9:30-16:00 ET), skipping checks.")
+    # Reached only if the cycle completed without an exception (a raise above
+    # propagates to job(), which logs it and skips the ping).
+    _ping_healthcheck()
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -350,17 +405,29 @@ async def run_checks(bot: Bot, chat_id: str) -> None:
 def start_agent(token: str, chat_id: str) -> threading.Thread:
     # Bot is created fresh inside each asyncio.run() so its httpx session
     # is not orphaned when the event loop closes between scheduler ticks.
+    # Both jobs catch ALL exceptions themselves: a transient failure (Telegram
+    # TimedOut, DNS outage, yfinance hiccup) must never propagate into the
+    # scheduler loop and kill the daemon thread. Catching inside the job (as
+    # opposed to only around schedule.run_pending()) also lets the `schedule`
+    # lib mark the run as done, preserving the 15-minute cadence instead of
+    # retrying a failing job every 60s.
     def job() -> None:
         async def _run() -> None:
             async with Bot(token) as bot:
                 await run_checks(bot, chat_id)
-        asyncio.run(_run())
+        try:
+            asyncio.run(_run())
+        except Exception:
+            logger.exception("[agent] check cycle failed -- will retry next tick")
 
     def morning_job() -> None:
         async def _run() -> None:
             async with Bot(token) as bot:
                 await run_morning_scan(bot, chat_id)
-        asyncio.run(_run())
+        try:
+            asyncio.run(_run())
+        except Exception:
+            logger.exception("[agent] morning scan failed")
 
     def _is_morning_scan_time(last_scan_date) -> bool:
         """True once per weekday when Israel time enters the 16:35 minute."""
@@ -376,10 +443,18 @@ def start_agent(token: str, chat_id: str) -> threading.Thread:
         job()  # run price/technical checks immediately on startup
         schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(job)
         while True:
-            schedule.run_pending()
-            if _is_morning_scan_time(last_scan_date):
-                last_scan_date = datetime.now(_IL_TZ).date()
-                morning_job()
+            # Backstop guard: job()/morning_job() already catch their own
+            # exceptions; this keeps the daemon alive against anything
+            # escaping `schedule` internals or the time check itself.
+            # time.sleep stays OUTSIDE the try so a repeating failure can
+            # never turn into a hot spin loop.
+            try:
+                schedule.run_pending()
+                if _is_morning_scan_time(last_scan_date):
+                    last_scan_date = datetime.now(_IL_TZ).date()
+                    morning_job()
+            except Exception:
+                logger.exception("[agent] scheduler tick failed -- daemon thread continues")
             time.sleep(60)
 
     thread = threading.Thread(target=loop, daemon=True)

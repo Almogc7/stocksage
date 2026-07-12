@@ -71,8 +71,14 @@ main.py
 - Sync→async bridge: the scheduler thread wraps each tick in
   `asyncio.run()` with a fresh `Bot` context. Any new alert-sending code from
   the scheduler thread must follow this pattern — never `await` directly.
-- Known fragility: exceptions escaping a scheduler tick kill the daemon
-  thread silently while the bot keeps running.
+- Reliability hardening (2026-07-12): scheduler jobs and the loop body catch
+  all exceptions and log them (`logging_setup.py` → rotating
+  `logs/stocksage.log`, DEBUG in file / INFO on console; handlers attach to
+  the `stocksage` namespace only so httpx never logs the bot token into the
+  file). A dead-man's-switch GET to `HEALTHCHECK_PING_URL` fires after every
+  successful `run_checks()` cycle (market open or closed); the bot registers
+  a global PTB error handler. The alert path uses `stocksage.*` loggers, not
+  `print()`.
 
 ### Stack B — Watchlist lifecycle (runs daily)
 
@@ -164,6 +170,8 @@ Watchlist lifecycle: `ACTIVE_MAX_SIZE=30`, promotion/demotion thresholds and
 hysteresis, eligibility liquidity floors.
 Telegram auth: `AUTHORIZED_CHAT_IDS` allowlist (falls back to
 `TELEGRAM_CHAT_ID`).
+Monitoring: `HEALTHCHECK_PING_URL` (env, empty = disabled) — dead-man's
+switch pinged after each successful agent check cycle.
 
 Composite engine: `COMPOSITE_RS_WINDOW_DAYS=60`,
 `COMPOSITE_RS_REQUIRED_BULL/BEAR=1.0/1.2`,

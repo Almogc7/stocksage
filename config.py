@@ -37,6 +37,22 @@ else:
     AUTHORIZED_CHAT_IDS = frozenset()
 
 # ─────────────────────────────────────────────
+#  Reliability / monitoring
+# ─────────────────────────────────────────────
+# Dead-man's switch: this URL receives a GET at the end of every SUCCESSFUL
+# agent check cycle (run_checks), market open or closed — the signal means
+# "the scheduler daemon is alive", not "the market was scanned". If the
+# daemon thread dies or every cycle starts failing, pings stop and the
+# monitoring service alerts you.
+#
+# Setup (healthchecks.io, free tier):
+#   1. Create an account, create a Check, set Period=15 min, Grace=15 min.
+#   2. Copy its ping URL (https://hc-ping.com/<uuid>) into .env:
+#        HEALTHCHECK_PING_URL=https://hc-ping.com/your-uuid-here
+# Leave unset/empty to disable pinging entirely (no-op).
+HEALTHCHECK_PING_URL: str = os.getenv("HEALTHCHECK_PING_URL", "").strip()
+
+# ─────────────────────────────────────────────
 #  Watchlist — מחולק לקטגוריות
 # ─────────────────────────────────────────────
 WATCHLIST: dict[str, list[str]] = {
