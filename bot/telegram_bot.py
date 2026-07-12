@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("stocksage.bot")
@@ -12,6 +12,8 @@ from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 from agent.core import run_morning_scan
+from analyzers.composite import composite_score, compute_market_context
+from analyzers.position_management import evaluate_position
 from analyzers.technical import full_analysis
 from config import (
     AUTHORIZED_CHAT_IDS,
@@ -162,6 +164,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "help_trades_sec":       "\U0001f4bc עסקאות",
         "help_tools_sec":        "⚙️ כלים",
         "help_analyze":          "ניתוח טכני מלא",
+        "help_composite":        "ציון מנוע קומפוזיט (תצפית בלבד)",
+        "help_position":         "בדיקת סטופ ואיתותי יציאה לפוזיציה פתוחה",
         "help_scan":             "סריקת מניות חמות עכשיו",
         "help_watchlist_cmd":    "הצג את כל המניות",
         "help_add":              "הוסף מניה",
@@ -290,6 +294,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "help_trades_sec":       "\U0001f4bc Trades",
         "help_tools_sec":        "⚙️ Tools",
         "help_analyze":          "Full technical analysis",
+        "help_composite":        "Composite engine score (observation mode)",
+        "help_position":         "Stop/exit check for an open position",
         "help_scan":             "Hot stocks scan now",
         "help_watchlist_cmd":    "Show all stocks",
         "help_add":              "Add a stock",
@@ -527,6 +533,211 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _send(update, _fmt_analysis(analysis, lang))
 
 
+# ── /composite and /position (additive; observation-mode engines) ────────────
+# English-only detail views (same precedent as /watchlist_status). Neither
+# command changes any existing handler, alert path, or the legacy engine.
+
+_COMPOSITE_FOOTER = (
+    "⚠️ Observation mode — NOT wired into alerting.\n"
+    "Not comparable to the legacy /analyze score\n"
+    "(different scale, different BUY bar)."
+)
+
+_POSITION_FOOTER = (
+    "⚠️ Advisory only — nothing is executed.\n"
+    "Completed bars only; to keep the stop monotonic\n"
+    "across checks, re-pass your current stop:\n"
+    "/position {symbol} {entry:g} {date} {stop:g}"
+)
+
+
+def _fmt_composite(result: dict) -> str:
+    """Format one composite_score() result dict (format approved 2026-07-12)."""
+    sep = _sep()
+    regime = result["regime"]
+    gate = result["hard_gate"]
+
+    lines = [f"\U0001f9ea Composite Score: {result['symbol']} ({result['engine']})", sep]
+    if regime.get("spy_available"):
+        cmp_ch = ">" if regime["regime"] == "BULL" else "<="
+        lines.append(
+            f"Regime: {regime['regime']} — SPY {regime['spy_close']:,.2f} "
+            f"{cmp_ch} SMA150 {regime['spy_sma150']:,.2f}"
+        )
+    else:
+        lines.append("Regime: UNKNOWN — SPY data unavailable (bear thresholds applied)")
+
+    if not gate["passed"]:
+        lines += [
+            f"Hard gate: ❌ FAIL ({gate['reason']})",
+            "Total: 0 — layers not scored.",
+            "",
+            _COMPOSITE_FOOTER,
+        ]
+        return "\n".join(lines)
+
+    L = result["layers"]
+    t, m, v, r = L["trend"], L["momentum"], L["volume"], L["relative_strength"]
+    rs_str = (f"RS {r['rs_ratio']} vs req {r['required_rs']}"
+              if r["rs_ratio"] is not None else "RS n/a (needs SPY history)")
+    obv_str = "OBV+" if v["obv_pts"] else "OBV-"
+    stop = result["stop"]
+    flag = "✅" if result["flag_buy"] else "❌"
+
+    lines += [
+        "Hard gate: ✅ PASS (close > SMA150 > SMA200)",
+        "",
+        "Layers (each /25):",
+        f"  Trend/ext  {t['points']:>5.1f}  (RSI {t['rsi']}, {t['pct_from_sma']:+.1f}% vs SMA150)",
+        f"  Momentum   {m['points']:>5.1f}  (MACD hist {m['macd_hist']:+.2f})",
+        f"  Volume     {v['points']:>5.1f}  (relvol {v['rel_vol']}x, {obv_str})",
+        f"  Rel str    {r['points']:>5.1f}  ({rs_str})",
+        "",
+        f"Total: {result['total_score']}/100 → BUY flag: {flag} "
+        f"(bar {regime['required_score']}, {regime['regime']})",
+        f"\U0001f6d1 Stop sizing: {stop['multiplier']}x ATR({stop['atr']}) → ${stop['stop_price']:,.2f}",
+        "",
+        _COMPOSITE_FOOTER,
+    ]
+    return "\n".join(lines)
+
+
+def _fmt_position(result: dict) -> str:
+    """Format one evaluate_position() result dict (format approved 2026-07-12)."""
+    sep = _sep()
+    trail = result["trailing_stop"]
+    initial = result["initial_stop_detail"]
+    signals = result["exit_signals"]
+    partial = result["partial_exit"]
+
+    if result["initial_stop_reconstructed"]:
+        stop_src = f"reconstructed, {initial['multiplier']}x ATR"
+    else:
+        stop_src = "as given"
+
+    lines = [
+        f"\U0001f4cf Position Check: {result['symbol']} (LONG)",
+        sep,
+        f"Entry: ${result['entry_price']:,.2f} on {result['entry_date']}",
+        f"Last completed close: ${result['last_completed_close']:,.2f} (R {result['r_multiple']:+.2f})",
+        f"Initial stop: ${result['initial_stop']:,.2f} ({stop_src})",
+        "",
+        f"\U0001f6d1 Recommended stop NOW: ${trail['stop_price']:,.2f}",
+    ]
+
+    stage_desc = {0: "initial stop (below 1R)", 1: "breakeven",
+                  2: f"Chandelier {trail['chandelier_multiplier']}x ATR"}[trail["stage"]]
+    if trail["basis"] == "previous":
+        stage_desc += " — held at previous stop (monotonic)"
+    lines.append(f"   Stage {trail['stage']} — {stage_desc}")
+    if trail["stage"] == 2:
+        lines.append(
+            f"   (high since entry ${result['highest_high_since_entry']:,.2f}, "
+            f"ATR ${result['current_atr']:,.2f})"
+        )
+    if result["stop_breached"]:
+        lines += ["\U0001f6a8 STOP BREACHED — last close at/below stop;",
+                  "   position would have been stopped out"]
+
+    lines.append("")
+    if signals["signals"]:
+        lines.append(f"Exit signals: {', '.join(signals['signals'])}")
+        for name in signals["signals"]:
+            detail = signals["details"][name]
+            detail_str = ", ".join(f"{k}={v}" for k, v in detail.items())
+            lines.append(f"  - {name}: {detail_str}")
+    else:
+        lines.append("Exit signals: none")
+    lines += [
+        f"Partial exit: {partial['reason']}",
+        "",
+        f"➡️ ACTION: {result['recommended_action']}",
+        "",
+        _POSITION_FOOTER.format(
+            symbol=result["symbol"], entry=result["entry_price"],
+            date=result["entry_date"], stop=trail["stop_price"],
+        ),
+    ]
+    return "\n".join(lines)
+
+
+async def cmd_composite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
+    lang = get_language(str(update.effective_chat.id))
+    s = STRINGS[lang]
+
+    if not context.args:
+        await _send(update, "Usage: /composite SYMBOL")
+        return
+
+    symbol = context.args[0].upper()
+    await _send(update, f"{s['fetching_data']} {symbol}...")
+
+    df = get_historical(symbol, period="1y")
+    if df is None:
+        await _send(update, f"❌ {s['not_found']} {symbol}")
+        return
+
+    market_open = is_market_open()
+    market_context = compute_market_context(market_open=market_open)
+    result = composite_score(symbol, df, market_context,
+                             market_open=market_open, log=False)
+    await _send(update, _fmt_composite(result))
+
+
+async def cmd_position(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_auth(update):
+        return
+    lang = get_language(str(update.effective_chat.id))
+    s = STRINGS[lang]
+
+    usage = ("Usage: /position SYMBOL ENTRY_PRICE ENTRY_DATE [STOP]\n"
+             "Example: /position NVDA 150 2026-05-01\n"
+             "STOP = your current stop (keeps it monotonic across checks;\n"
+             "omitted = reconstructed at a conservative 2.0x ATR)")
+    args = context.args
+    if len(args) < 3:
+        await _send(update, usage)
+        return
+    symbol = args[0].upper()
+    try:
+        entry_price = float(args[1])
+        entry_date = date.fromisoformat(args[2])
+        stop = float(args[3]) if len(args) > 3 else None
+    except ValueError:
+        await _send(update, usage)
+        return
+
+    await _send(update, f"{s['fetching_data']} {symbol}...")
+
+    df = get_historical(symbol, period="1y")
+    if df is None:
+        await _send(update, f"❌ {s['not_found']} {symbol}")
+        return
+
+    # One STOP argument, two roles: below entry it can only be the initial
+    # stop (and doubles as the monotonic floor); at/above entry it must be a
+    # trailing stop already moved up (breakeven+), so it is the floor only
+    # and the initial stop is reconstructed for the R-multiple math.
+    if stop is not None and stop < entry_price:
+        initial_stop, previous_stop = stop, stop
+    else:
+        initial_stop, previous_stop = None, stop
+
+    try:
+        result = evaluate_position(
+            symbol, df, entry_price, entry_date,
+            initial_stop=initial_stop, previous_stop=previous_stop,
+            market_open=is_market_open(),
+        )
+    except ValueError as exc:
+        await _send(update, f"❌ {exc}")
+        return
+
+    await _send(update, _fmt_position(result))
+
+
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_auth(update):
         return
@@ -761,6 +972,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"\n"
         f"{s['help_analysis_sec']}\n"
         f"/analyze SYMBOL — {s['help_analyze']}\n"
+        f"/composite SYMBOL — {s['help_composite']}\n"
         f"/morning_scan — {s['help_scan']} {s['help_legacy_note']}: /scan\n"
         f"\n"
         f"{s['help_watchlist_sec']}\n"
@@ -778,6 +990,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"/trade BUY|SELL SYMBOL QTY PRICE — {s['help_trade']}\n"
         f"/trades SYMBOL — {s['help_trades_cmd']}\n"
         f"/summary SYMBOL — {s['help_summary']}\n"
+        f"/position SYMBOL PRICE DATE [STOP] — {s['help_position']}\n"
         f"\n"
         f"{s['help_alerts_sec']}\n"
         f"/alerts — {s['help_alerts']}\n"
@@ -1314,6 +1527,10 @@ _BOT_COMMANDS = [
     BotCommand("watchlist_remove", "הסר מניה (alias ל-/remove)"),
     BotCommand("morning_scan",     "סריקת מניות חמות (alias ל-/scan)"),
     BotCommand("admin_help",       "פקודות ניהול/טכניות"),
+    # Additive observation-mode commands (2026-07-12) — neither touches the
+    # legacy engine, alert path, or any existing handler.
+    BotCommand("composite",        "Composite engine score (observation mode)"),
+    BotCommand("position",         "Stop/exit check for an open position"),
 ]
 
 
@@ -1381,5 +1598,9 @@ def run_bot(token: str) -> None:
     app.add_handler(CommandHandler("watchlist_remove", cmd_remove))
     app.add_handler(CommandHandler("morning_scan",     cmd_scan))
     app.add_handler(CommandHandler("admin_help",       cmd_admin_help))
+
+    # Observation-mode engines (additive, 2026-07-12)
+    app.add_handler(CommandHandler("composite",        cmd_composite))
+    app.add_handler(CommandHandler("position",         cmd_position))
 
     app.run_polling()

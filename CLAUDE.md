@@ -71,6 +71,9 @@ main.py
  │   └─ run_morning_scan() once per weekday ~16:35 IL (hand-rolled time check)
  └─ bot/telegram_bot.py  run_polling()        [main thread, blocking, async]
      /analyze /scan /add /remove /trade /watchlist_* /refresh_watchlist ...
+     /composite /position — additive observation-mode views over the
+     composite engine and position_management (English-only, advisory,
+     no effect on alerting or any legacy handler)
 ```
 
 - `full_analysis()` verdicts: `STRONG BUY` (≥75) / `BUY` (≥55) / `WATCH`
@@ -146,8 +149,10 @@ bands). Staged policy: <1R initial stop, ≥1R breakeven, >1.5R Chandelier
 caller-supplied `previous_stop` (the module is stateless — position state
 lives with the caller). Three advisory exit flags (bearish RSI divergence,
 climax volume, RSI≥80), partial-exit suggestion at ≥2R, `stop_breached`
-detection. Completed bars only. NOT wired into alerting/execution — CLI
-only (`scripts/run_position_check.py`).
+detection. Completed bars only. NOT wired into alerting/execution —
+surfaced via CLI (`scripts/run_position_check.py`) and the additive
+`/position` bot command (`/composite` similarly surfaces the composite
+engine; both are read-only views, 2026-07-12).
 
 ### Stack D — Dashboard (separate process)
 
