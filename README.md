@@ -294,4 +294,3 @@ MIT License — see [LICENSE](../LICENSE) for details.
 
 StockSage is built for **educational and research purposes only**. It is not financial advice, and nothing in this project should be construed as a recommendation to buy or sell any security. Trading stocks involves significant risk. Past performance of any signal, score, or indicator does not guarantee future results. Always do your own research and consult a qualified financial advisor before making investment decisions.
 
-almog test
