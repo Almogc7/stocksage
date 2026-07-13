@@ -25,10 +25,22 @@ function Write-Log($message) {
     "[$timestamp] $message" | Out-File -FilePath $logFile -Append -Encoding utf8
 }
 
+# Run a native command with stderr merged into stdout by cmd.exe, BEFORE
+# PowerShell sees it. Under $ErrorActionPreference="Stop", PS 5.1 wraps
+# redirected native stderr lines in NativeCommandError records and promotes
+# the first one to a terminating exception -- git's informational stderr
+# (e.g. "From https://github.com/...") would abort the script mid-pull.
+# Success/failure is determined ONLY by $LASTEXITCODE, which cmd /c
+# propagates from the wrapped command.
+function Invoke-Native([string]$commandLine) {
+    $output = cmd /c "$commandLine 2>&1"
+    return ($output -join "`n")
+}
+
 try {
     Write-Log "check starting"
 
-    $dirty = git status --porcelain 2>&1
+    $dirty = Invoke-Native "git status --porcelain"
     if ($LASTEXITCODE -ne 0) {
         Write-Log "ERROR: git status failed (exit $LASTEXITCODE) -- skipping. Output: $dirty"
         exit 1
@@ -38,14 +50,14 @@ try {
         exit 0
     }
 
-    git fetch origin main --quiet 2>&1 | Out-Null
+    Invoke-Native "git fetch origin main --quiet" | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-Log "ERROR: git fetch origin main failed (exit $LASTEXITCODE) -- skipping"
         exit 1
     }
 
-    $localHead = (git rev-parse HEAD).Trim()
-    $remoteHead = (git rev-parse origin/main).Trim()
+    $localHead = (Invoke-Native "git rev-parse HEAD").Trim()
+    $remoteHead = (Invoke-Native "git rev-parse origin/main").Trim()
 
     if ($localHead -eq $remoteHead) {
         Write-Log "up to date ($($localHead.Substring(0,8)))"
@@ -54,18 +66,22 @@ try {
 
     Write-Log "new commits found: $($localHead.Substring(0,8)) -> $($remoteHead.Substring(0,8)) -- pulling"
 
-    $pullOutput = git pull --ff-only origin main 2>&1
+    $pullOutput = Invoke-Native "git pull --ff-only origin main"
     if ($LASTEXITCODE -ne 0) {
         Write-Log "ERROR: git pull --ff-only failed (exit $LASTEXITCODE) -- NOT restarting bot. Manual intervention needed (possible diverged history). Output: $pullOutput"
         exit 1
     }
 
-    $newHead = (git rev-parse HEAD).Trim()
+    $newHead = (Invoke-Native "git rev-parse HEAD").Trim()
     Write-Log "pulled successfully, now at $($newHead.Substring(0,8)) -- restarting StockSage Bot task"
 
-    schtasks /End /TN "StockSage Bot" 2>&1 | Out-Null
+    Invoke-Native 'schtasks /End /TN "StockSage Bot"' | Out-Null
     Start-Sleep -Seconds 3
-    schtasks /Run /TN "StockSage Bot" 2>&1 | Out-Null
+    Invoke-Native 'schtasks /Run /TN "StockSage Bot"' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "ERROR: schtasks /Run 'StockSage Bot' failed (exit $LASTEXITCODE) -- bot may be stopped, start it manually"
+        exit 1
+    }
 
     Write-Log "restart command issued"
 }
