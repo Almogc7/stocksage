@@ -6,3 +6,5 @@ __pycache__/
 db/*.db
 db/*backup*.db
 logs/
+
+.claude/settings.local.json
