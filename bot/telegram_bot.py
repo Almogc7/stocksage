@@ -13,6 +13,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 from agent.core import run_morning_scan
 from analyzers.composite import composite_score, compute_market_context
+from analyzers.eligibility import classify_security_type
 from analyzers.position_management import evaluate_position
 from analyzers.technical import full_analysis
 from config import (
@@ -40,9 +41,11 @@ from db.database import (
     list_recent_evaluation_runs,
     log_alert,
     log_trade,
+    record_state_change,
     remove_from_watchlist,
     run_initial_classification,
     set_language,
+    set_pinned,
     update_symbol_state,
 )
 from services.watchlist_evaluator import explain_symbol, run_watchlist_evaluation
@@ -166,6 +169,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "help_analyze":          "ניתוח טכני מלא",
         "help_composite":        "ציון מנוע קומפוזיט (תצפית בלבד)",
         "help_position":         "בדיקת סטופ ואיתותי יציאה לפוזיציה פתוחה",
+        "help_pin":              "נעץ מניה ל-Active לצמיתות (📌)",
+        "help_unpin":            "שחרר נעיצה — חזרה להערכה רגילה",
         "help_scan":             "סריקת מניות חמות עכשיו",
         "help_watchlist_cmd":    "הצג את כל המניות",
         "help_add":              "הוסף מניה",
@@ -296,6 +301,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "help_analyze":          "Full technical analysis",
         "help_composite":        "Composite engine score (observation mode)",
         "help_position":         "Stop/exit check for an open position",
+        "help_pin":              "Pin a stock permanently to ACTIVE (📌)",
+        "help_unpin":            "Unpin — resume normal evaluation",
         "help_scan":             "Hot stocks scan now",
         "help_watchlist_cmd":    "Show all stocks",
         "help_add":              "Add a stock",
@@ -738,6 +745,77 @@ async def cmd_position(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _send(update, _fmt_position(result))
 
 
+async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /pin SYMBOL — pin a stock permanently into the ACTIVE tier (additive,
+    English-only, 2026-07-13). The nightly evaluation never demotes, evicts,
+    or ineligible-marks a pinned symbol, and its hysteresis counters are
+    held at zero. Alerting/scoring is unaffected — a pinned symbol is an
+    ordinary ACTIVE member to the alert loop and the composite engine.
+    """
+    if not await _check_auth(update):
+        return
+    if not context.args:
+        await _send(update, "Usage: /pin SYMBOL")
+        return
+
+    symbol = context.args[0].upper()
+    status = get_symbol_status(symbol)
+    if status is None:
+        await _send(update, f"❌ {symbol} is not in the watchlist. Add it first: /add {symbol} CATEGORY")
+        return
+    if status["wl_state"] == "USER_REMOVED" or not status["enabled"]:
+        await _send(update, f"❌ {symbol} was removed from the watchlist. Re-add it first: /add {symbol} CATEGORY")
+        return
+    sec_type = status["security_type"] or classify_security_type(symbol)
+    if sec_type in ("etf", "index", "crypto"):
+        await _send(update, f"❌ {symbol} is classified as {sec_type} — only stocks can be pinned to ACTIVE.")
+        return
+
+    if status.get("pinned"):
+        await _send(update, f"📌 {symbol} is already pinned.")
+        return
+
+    set_pinned(symbol, True)
+    promoted = ""
+    if status["wl_state"] != "ACTIVE":
+        record_state_change(symbol, "ACTIVE")
+        promoted = f" (promoted from {status['wl_state']})"
+    await _send(
+        update,
+        f"📌 {symbol} pinned to ACTIVE{promoted}.\n"
+        "The nightly evaluation will never demote or evict it. "
+        "Alerts and scoring are unchanged.\n"
+        f"Release with /unpin {symbol}."
+    )
+
+
+async def cmd_unpin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/unpin SYMBOL — release a pin; normal lifecycle resumes from a clean slate."""
+    if not await _check_auth(update):
+        return
+    if not context.args:
+        await _send(update, "Usage: /unpin SYMBOL")
+        return
+
+    symbol = context.args[0].upper()
+    status = get_symbol_status(symbol)
+    if status is None:
+        await _send(update, f"❌ {symbol} is not in the watchlist.")
+        return
+    if not status.get("pinned"):
+        await _send(update, f"{symbol} is not pinned — nothing to do.")
+        return
+
+    set_pinned(symbol, False)
+    await _send(
+        update,
+        f"📌 {symbol} unpinned. It stays ACTIVE for now and returns to normal "
+        "evaluation with fresh hysteresis counters — demotion requires the "
+        "usual consecutive low-score evaluations from scratch."
+    )
+
+
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_auth(update):
         return
@@ -982,6 +1060,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"/watchlist_context — {s['help_watchlist_context']}\n"
         f"/watchlist_ineligible — {s['help_watchlist_ineligible']}\n"
         f"/watchlist_status SYMBOL — {s['help_watchlist_status']}\n"
+        f"/pin SYMBOL — {s['help_pin']}\n"
+        f"/unpin SYMBOL — {s['help_unpin']}\n"
         f"/watchlist_add SYMBOL CATEGORY — {s['help_add']} {s['help_legacy_note']}: /add\n"
         f"/watchlist_remove SYMBOL — {s['help_remove']} {s['help_legacy_note']}: /remove\n"
         f"/refresh_watchlist — {s['help_refresh_watchlist']}\n"
@@ -1107,7 +1187,8 @@ async def cmd_watchlist_active(update: Update, context: ContextTypes.DEFAULT_TYP
             status = get_symbol_status(sym)
             score = status.get('relevance_score') if status else None
             score_str = f" [{score}]" if score is not None else ""
-            lines.append(f"  {sym}{score_str}")
+            pin_str = "📌 " if status and status.get('pinned') else ""
+            lines.append(f"  {pin_str}{sym}{score_str}")
         lines.append("")
     await _send(update, "\n".join(lines[:35]).strip())
 
@@ -1531,6 +1612,9 @@ _BOT_COMMANDS = [
     # legacy engine, alert path, or any existing handler.
     BotCommand("composite",        "Composite engine score (observation mode)"),
     BotCommand("position",         "Stop/exit check for an open position"),
+    # Pinning (2026-07-13) — lifecycle-only override, alerting unaffected.
+    BotCommand("pin",              "Pin a stock permanently to ACTIVE"),
+    BotCommand("unpin",            "Unpin — resume normal evaluation"),
 ]
 
 
@@ -1602,5 +1686,7 @@ def run_bot(token: str) -> None:
     # Observation-mode engines (additive, 2026-07-12)
     app.add_handler(CommandHandler("composite",        cmd_composite))
     app.add_handler(CommandHandler("position",         cmd_position))
+    app.add_handler(CommandHandler("pin",              cmd_pin))
+    app.add_handler(CommandHandler("unpin",            cmd_unpin))
 
     app.run_polling()

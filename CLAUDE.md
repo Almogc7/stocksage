@@ -74,6 +74,15 @@ main.py
      /composite /position — additive observation-mode views over the
      composite engine and position_management (English-only, advisory,
      no effect on alerting or any legacy handler)
+     /pin /unpin — pin a stock permanently into the ACTIVE tier (2026-07-13):
+     the nightly evaluation never demotes/evicts/ineligible-marks a pinned
+     symbol and holds its hysteresis counters at zero (enforced in
+     services/watchlist_evaluator.py, NOT in determine_state_change());
+     /unpin resumes the normal lifecycle from fresh counters. Pins count
+     toward ACTIVE_MAX_SIZE. Alerting/scoring is unaffected — pinned
+     symbols are ordinary ACTIVE members to the alert loop. 📌 marker in
+     /watchlist_active. Stocks only (no ETF/index/crypto); /remove clears
+     the pin.
 ```
 
 - `full_analysis()` verdicts: `STRONG BUY` (≥75) / `BUY` (≥55) / `WATCH`
@@ -177,7 +186,8 @@ Python's 150/200 lines are SMA-aligned as of 2026-07-11 (step 6 done).
 
 SQLite at `db/stocksage.db`, managed entirely via `db/database.py` (~1,450
 lines; all schema changes are additive+idempotent in `migrate_db()`).
-Tables: `watchlist` (with lifecycle columns), `trades`, `alerts`,
+Tables: `watchlist` (with lifecycle columns; v9 adds `pinned` — user-pinned
+permanent ACTIVE membership, see /pin), `trades`, `alerts`,
 `alert_signals` (1:1 structured snapshot per alert: score/verdict/price/
 RSI/ATR/stop/TP + triggered_signals JSON; written by `log_alert()` when an
 analysis dict is passed), `alert_outcomes` (1:1 post-alert performance —

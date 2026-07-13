@@ -117,6 +117,13 @@ def migrate_db() -> None:
       first_barrier_hit, r_multiple). Schema only for now: nothing writes
       it yet — a future population job fills rows once enough trading
       days have elapsed after each alert.
+
+    Column added in v9:
+      pinned — 1 = user-pinned to the ACTIVE tier via /pin. The nightly
+      evaluation never demotes/evicts/ineligible-marks a pinned symbol and
+      holds its hysteresis counters at zero; /unpin restores the normal
+      lifecycle from a clean slate. Alerting is unaffected (pinned symbols
+      are ordinary ACTIVE members to the alert loop).
     """
     with _connect() as conn:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()}
@@ -161,6 +168,16 @@ def migrate_db() -> None:
             # current, possibly dynamically-promoted/demoted, wl_state back to
             # the hardcoded seed rules.
             conn.execute("UPDATE watchlist SET wl_classified = 1")
+
+        # v9 column — user-pinned symbols. pinned=1 keeps a symbol
+        # permanently in the ACTIVE tier: the nightly evaluation never
+        # demotes, evicts, or marks it ineligible (enforced in
+        # services/watchlist_evaluator.py), and its hysteresis counters are
+        # held at zero while pinned. Set/cleared only by /pin and /unpin.
+        if "pinned" not in existing:
+            conn.execute(
+                "ALTER TABLE watchlist ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
+            )
 
         # v4 table — evaluation run tracking (Phase 2 of the dynamic watchlist
         # lifecycle). Pure bookkeeping; never modifies watchlist rows itself.
@@ -401,7 +418,9 @@ def add_to_watchlist(symbol: str, category: str) -> None:
     sets enabled=1 and updates the category, so a user can deliberately
     re-add a symbol they had removed and optionally move it to a new
     category at the same time. Also resets wl_state to MONITOR so the
-    eligibility engine can re-evaluate the symbol on the next cycle.
+    eligibility engine can re-evaluate the symbol on the next cycle —
+    unless the symbol is pinned, in which case its state is preserved
+    (/add must not silently knock a pinned symbol out of ACTIVE).
     """
     sym = symbol.upper()
     with _connect() as conn:
@@ -412,7 +431,7 @@ def add_to_watchlist(symbol: str, category: str) -> None:
             "   enabled = 1,"
             "   category = excluded.category,"
             "   removed_at = NULL,"
-            "   wl_state = 'MONITOR',"
+            "   wl_state = CASE WHEN watchlist.pinned = 1 THEN watchlist.wl_state ELSE 'MONITOR' END,"
             "   wl_classified = 1",
             (sym, category),
         )
@@ -455,11 +474,13 @@ def remove_from_watchlist(symbol: str) -> None:
     future calls to populate_from_config() (via INSERT OR IGNORE) see the
     existing row and leave it disabled. This prevents removed symbols from
     reappearing after application restarts or git pulls.
+
+    Explicit removal always clears the pinned flag — /remove wins over /pin.
     """
     with _connect() as conn:
         conn.execute(
             "UPDATE watchlist SET enabled = 0, removed_at = ?, wl_state = 'USER_REMOVED',"
-            " wl_classified = 1 WHERE symbol = ?",
+            " wl_classified = 1, pinned = 0 WHERE symbol = ?",
             (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), symbol.upper()),
         )
 
@@ -506,6 +527,31 @@ def update_symbol_state(symbol: str, state: str, reason: str = "") -> None:
             "UPDATE watchlist SET wl_state = ?, exclusion_reason = ? WHERE symbol = ?",
             (state, reason, symbol.upper()),
         )
+
+
+def set_pinned(symbol: str, pinned: bool) -> bool:
+    """
+    Set or clear the pinned flag for one symbol (/pin, /unpin).
+
+    Only touches the flag itself — the caller (bot command) is responsible
+    for forcing wl_state to ACTIVE on pin via record_state_change().
+    Returns False if the symbol is not in the watchlist at all.
+    """
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE watchlist SET pinned = ? WHERE symbol = ?",
+            (1 if pinned else 0, symbol.upper()),
+        )
+        return cur.rowcount > 0
+
+
+def get_pinned_symbols() -> list[str]:
+    """Return enabled=1 symbols with pinned=1, sorted."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT symbol FROM watchlist WHERE pinned = 1 AND enabled = 1 ORDER BY symbol"
+        ).fetchall()
+    return [row["symbol"] for row in rows]
 
 
 def get_symbols_by_state(state: str) -> list[str]:

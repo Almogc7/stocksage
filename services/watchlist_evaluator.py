@@ -94,10 +94,18 @@ from data.market_data_validator import MarketDataClient, ProviderStatus
 _NON_STOCK_TYPES = frozenset({"etf", "index", "crypto"})
 
 # Sentinel score used only for the internal _ActiveTracker bookkeeping of
-# symbols kept ACTIVE due to a transient provider failure this run (we have
-# no real score for them). High enough that they are never picked as the
-# "lowest" candidate for a same-run replacement eviction.
+# symbols that must never be picked as the "lowest" candidate for a
+# same-run replacement eviction: symbols kept ACTIVE due to a transient
+# provider failure this run (we have no real score for them), and pinned
+# symbols (their real score is recorded on the SymbolEvalResult, but their
+# ACTIVE membership is not up for competition).
 _PROTECTED_SCORE = 999
+
+
+def _is_pinned(row: dict) -> bool:
+    # .get(): rows from older test fixtures / pre-migration snapshots may
+    # lack the v9 column; absent means not pinned.
+    return bool(row.get("pinned"))
 
 
 def _safe_avg_volume(value) -> int:
@@ -274,7 +282,13 @@ def _build_db_fields(
             else:
                 fields["consec_promote_count"] = 0
         elif current_state == "ACTIVE":
-            if score < DEMOTION_THRESHOLD:
+            if _is_pinned(row):
+                # Pinned: hysteresis counters are held at zero, so /unpin
+                # always starts a fresh streak — a symbol pinned mid-demotion
+                # never gets demoted right after unpinning.
+                fields["consec_demote_count"] = 0
+                fields["consec_promote_count"] = 0
+            elif score < DEMOTION_THRESHOLD:
                 fields["consec_demote_count"] = row["consec_demote_count"] + 1
                 fields["consec_promote_count"] = 0
             else:
@@ -616,7 +630,12 @@ def _run(
         new_state = eval_out["new_state"]
         reason = eval_out["reason"]
 
-        if new_state == "MONITOR" and result.provider_degraded:
+        if _is_pinned(row) and new_state != "ACTIVE":
+            # Pinned symbols never leave ACTIVE — not by low score, not by
+            # hard disqualification. The score is still recorded normally.
+            reason = f"pinned: stays ACTIVE (would have been {new_state}: {reason})"
+            new_state = "ACTIVE"
+        elif new_state == "MONITOR" and result.provider_degraded:
             new_state = "ACTIVE"
             reason = f"provider degraded this run; demotion suppressed (would have been: {eval_out['reason']})"
 
@@ -624,7 +643,10 @@ def _run(
         sr.reason = reason
         _set_db_fields(sr, row, market_results[sym], sr.relevance_score, "ACTIVE", new_state, reason, now_str)
         if new_state == "ACTIVE":
-            tracker.add(sym, sr.relevance_score, _is_bank(row["categories"]))
+            # Pinned symbols enter the tracker with the protected sentinel so
+            # they can never be chosen as the eviction victim in pass 2.
+            tracker_score = _PROTECTED_SCORE if _is_pinned(row) else sr.relevance_score
+            tracker.add(sym, tracker_score, _is_bank(row["categories"]))
         elif new_state == "MONITOR":
             result.proposed_demotions.append(sym)
         elif new_state == "TEMPORARILY_INELIGIBLE":
@@ -657,6 +679,19 @@ def _run(
         )
         sr.relevance_score = eval_out["score"]
         sr.hard_eligibility_passed = eval_out["new_state"] != "TEMPORARILY_INELIGIBLE"
+
+        if _is_pinned(row):
+            # Pin invariant self-heal: a pinned symbol should never be in
+            # MONITOR (/pin forces ACTIVE immediately), but if one is found
+            # here (manual edit, legacy path) it returns to ACTIVE directly —
+            # no hysteresis, no promotion-cap competition.
+            sr.proposed_state = "ACTIVE"
+            sr.reason = "pinned: restored to ACTIVE (pin invariant)"
+            _set_db_fields(sr, row, mr, sr.relevance_score, "MONITOR", "ACTIVE", sr.reason, now_str)
+            tracker.add(sym, _PROTECTED_SCORE, _is_bank(row["categories"]))
+            result.proposed_promotions.append(sym)
+            results_by_symbol[sym] = sr
+            continue
 
         if eval_out["new_state"] == "ACTIVE":
             pending_promotion.append((sr.relevance_score, sym))
@@ -699,9 +734,17 @@ def _run(
         )
         sr.relevance_score = eval_out["score"]
         sr.hard_eligibility_passed = True
-        sr.proposed_state = "MONITOR"
-        sr.reason = "recovered: data valid again; returning to MONITOR for normal promotion cycle"
-        _set_db_fields(sr, row, mr, sr.relevance_score, "TEMPORARILY_INELIGIBLE", "MONITOR", sr.reason, now_str)
+        if _is_pinned(row):
+            # Pin invariant self-heal: pinned symbols skip the
+            # recover-to-MONITOR-first rule and return straight to ACTIVE.
+            sr.proposed_state = "ACTIVE"
+            sr.reason = "pinned: restored to ACTIVE after data recovery (pin invariant)"
+            _set_db_fields(sr, row, mr, sr.relevance_score, "TEMPORARILY_INELIGIBLE", "ACTIVE", sr.reason, now_str)
+            tracker.add(sym, _PROTECTED_SCORE, _is_bank(row["categories"]))
+        else:
+            sr.proposed_state = "MONITOR"
+            sr.reason = "recovered: data valid again; returning to MONITOR for normal promotion cycle"
+            _set_db_fields(sr, row, mr, sr.relevance_score, "TEMPORARILY_INELIGIBLE", "MONITOR", sr.reason, now_str)
         result.proposed_recoveries.append(sym)
         results_by_symbol[sym] = sr
 
@@ -808,6 +851,12 @@ def _apply_failure_outcome(
         # db_fields stays None: a transient provider blip must never be
         # written — not even a refreshed last_evaluated/score — so the
         # symbol's real last-known-good data is left completely untouched.
+    elif _is_pinned(row) and current_state == "ACTIVE":
+        # Pinned symbols never leave ACTIVE, even on a data-quality failure.
+        # Treated like a transient blip: nothing is written (db_fields stays
+        # None) so the last-known-good score/timestamps survive.
+        sr.proposed_state = "ACTIVE"
+        sr.reason = f"pinned: stays ACTIVE despite data-quality failure ({market_result.failure_reason})"
     elif current_state == "TEMPORARILY_INELIGIBLE":
         sr.proposed_state = "TEMPORARILY_INELIGIBLE"
         sr.reason = f"still ineligible: {market_result.failure_reason}"
