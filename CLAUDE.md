@@ -220,6 +220,13 @@ Alert cooldown is NOT configurable: once per symbol per UTC day, DB-backed
 Morning scan: `SCAN_MIN_SCORE=50`, `SCAN_TOP_N=5`, 16:35 IL trigger.
 Watchlist lifecycle: `ACTIVE_MAX_SIZE=30`, promotion/demotion thresholds and
 hysteresis, eligibility liquidity floors.
+Category note: **"Quantum Computing" (IONQ/RGTI/QBTS, added 2026-07-14) is
+high volatility — speculative** (ATR% ~9–10 vs the 1.5–8 band typical of the
+rest of the universe; ±10–20% sessions without news). Deliberately NOT
+special-cased in code: all stop sizing is ATR-proportional so stops scale
+naturally, and eligibility's volatility component already penalizes
+ATR% > 8. Weigh alerts on these symbols with that context (see the seed
+comment in `config.py`).
 Telegram auth: `AUTHORIZED_CHAT_IDS` allowlist (falls back to
 `TELEGRAM_CHAT_ID`).
 Monitoring: `HEALTHCHECK_PING_URL` (env, empty = disabled) — dead-man's

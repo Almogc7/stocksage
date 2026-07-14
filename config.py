@@ -401,6 +401,19 @@ WATCHLIST: dict[str, list[str]] = {
         "FCX",     # Freeport-McMoRan
         "CPER",    # US Copper Index Fund
     ],
+
+    # ⚠️ HIGH VOLATILITY — SPECULATIVE (added 2026-07-14). Pure-play quantum
+    # computing: routinely ±10-20% in a session without news, P/S > 100,
+    # ongoing operating losses, ATR% ~9-10 (vs 1.5-8 for the rest of the
+    # watchlist). Deliberately NOT special-cased anywhere: eligibility's
+    # volatility component already penalizes ATR% > 8, and all stop sizing
+    # is ATR-proportional so stops scale with their volatility naturally.
+    # Read alerts on these symbols with that context in mind.
+    "Quantum Computing": [
+        "IONQ",    # IonQ — trapped-ion, largest pure-play by revenue
+        "RGTI",    # Rigetti Computing — superconducting qubits
+        "QBTS",    # D-Wave Quantum — quantum annealing
+    ],
 }
 
 # ─────────────────────────────────────────────
