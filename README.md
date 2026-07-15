@@ -1,18 +1,20 @@
 # 📈 StockSage
 
 > Automated swing-trading alert system for US stocks.
-> Monitors 80+ symbols, runs technical analysis every 15 minutes,
-> and sends buy alerts with chart images directly to Telegram.
+> Tracks 400+ symbols across 15 categories; a nightly eligibility engine
+> promotes up to 30 into the ACTIVE tier, which is scanned every 15 minutes
+> for buy alerts sent to Telegram with chart images.
 
 ---
 
 ## 🚀 Features
 
-- **9-gate alert filter** — only high-quality BUY signals get through
-- **Composite buy score 0–100** across 7 weighted indicators
-- **Chart image attached to every alert** (candlesticks, MA150, MA200, RSI, Volume)
+- **7-gate alert filter** — only high-quality BUY signals get through
+- **Legacy opportunity score 0–100** across 7 weighted indicators (drives alerts)
+- **Parallel composite engine + advisory position management** (`/composite`, `/position` — observation mode)
+- **Chart image attached to every alert** (candlesticks, SMA150, SMA200, RSI, Volume)
 - **Morning scan** every weekday at market open — top 5 opportunities
-- **80+ symbols** across 13 categories (AI, Crypto, Nuclear, Space, Data Center, and more)
+- **400+ symbols** across 15 categories (AI, Crypto, Nuclear, Space, Data Center, Quantum, and more) with a multi-tier lifecycle: nightly eligibility evaluation promotes up to 30 into the alert-scanned ACTIVE tier
 - **Hebrew/English bilingual** Telegram bot (`/language he` / `/language en`)
 - **Trade journal** with P&L tracking via `/trade` commands
 - **Streamlit dashboard** with live prices and interactive charts
@@ -93,8 +95,8 @@ stocksage/
 **1. Clone the repository**
 
 ```bash
-git clone https://github.com/Almogc7/StockSage_V2.git
-cd StockSage_V2
+git clone https://github.com/Almogc7/stocksage.git
+cd stocksage
 ```
 
 **2. Create a virtual environment**
@@ -146,7 +148,8 @@ streamlit run stocksage/dashboard.py
 | Variable | Description | Default |
 |---|---|---|
 | `TELEGRAM_ALLOW_WATCHLIST_APPLY` | Allow `/refresh_watchlist apply confirm` to write real changes from Telegram | `false` |
-| `WATCHLIST_SCHEDULE_APPLY` | Allow an unattended scheduled run to apply real changes (no automatic scheduler runs yet regardless) | `false` |
+| `WATCHLIST_SCHEDULE_APPLY` | Global default for unattended scheduled runs. **Note:** the nightly Windows task (02:30 IL, see "Running on Windows" below) passes an explicit `--scheduled-apply` CLI override, so it applies real changes every market night regardless of this default — apply intent deliberately lives in the task, not in a global flag | `false` |
+| `HEALTHCHECK_PING_URL` | Dead-man's-switch URL pinged after every successful agent check cycle (empty = disabled) | empty |
 | `WATCHLIST_SCHEDULE_HOUR_ET` / `WATCHLIST_SCHEDULE_MINUTE_ET` | Daily evaluation time, America/New_York | `17` / `30` |
 | `WATCHLIST_SCHEDULE_STUCK_RUN_TIMEOUT_MINUTES` | Minutes before a stuck `started` run is auto-marked failed | `60` |
 | `WATCHLIST_EXTRA_HOLIDAY_DATES` | Extra comma-separated US market closure dates (`YYYY-MM-DD`) beyond the built-in holiday calendar | empty |
@@ -154,7 +157,7 @@ streamlit run stocksage/dashboard.py
 | `ACTIVE_MAX_SIZE` / `ACTIVE_BANK_MAX` | ACTIVE-tier symbol cap / bank-sector sub-cap | `30` / `8` |
 | `PROMOTION_THRESHOLD` / `DEMOTION_THRESHOLD` | Relevance-score thresholds for tier transitions | `60` / `45` |
 
-See `CLAUDE_CHANGES.md` and `STOCKSAGE_FINAL_ROLLOUT_PLAN.md` for the full list and recommended rollout order — **leave `TELEGRAM_ALLOW_WATCHLIST_APPLY` and `WATCHLIST_SCHEDULE_APPLY` unset (false) until you've reviewed several days of dry-run output.**
+Binding architecture rulings live in `docs/DECISIONS.md` — **leave `TELEGRAM_ALLOW_WATCHLIST_APPLY` and `WATCHLIST_SCHEDULE_APPLY` unset (false); the nightly task carries its own explicit apply intent.**
 
 ---
 
@@ -176,19 +179,26 @@ See `CLAUDE_CHANGES.md` and `STOCKSAGE_FINAL_ROLLOUT_PLAN.md` for the full list 
 | `/language <he\|en>` | Switch bot language (Hebrew / English) |
 | `/test` | Send a test alert to confirm the bot is working |
 | `/help` | Show all available commands |
+| `/admin_help` | Technical/operational command menu (`/test`, refresh auditing) |
+| `/composite <SYMBOL>` | Composite-engine score breakdown — observation mode, English-only, separate scale from the legacy score |
+| `/position <SYMBOL> <ENTRY> <DATE> [STOP]` | Advisory trailing-stop / exit-signal check for an open LONG position |
+| `/pin <SYMBOL>` | Pin a stock permanently into the ACTIVE tier (📌 marker; never demoted/evicted by the nightly evaluation; alerting unchanged) |
+| `/unpin <SYMBOL>` | Release a pin — normal lifecycle resumes with fresh hysteresis counters |
+
+Aliases: `/watchlist_add` = `/add`, `/watchlist_remove` = `/remove`, `/morning_scan` = `/scan`.
 
 ### Watchlist lifecycle commands
 
 These require authorization like every other command above. The watchlist
 itself is multi-tier (ACTIVE / MONITOR / ETF_INDEX_CONTEXT /
 TEMPORARILY_INELIGIBLE / USER_REMOVED), persisted in SQLite, and evaluated
-by a dry-run/apply engine — see `CLAUDE_CHANGES.md` and
-`STOCKSAGE_FINAL_ROLLOUT_PLAN.md` for the full design.
+by a dry-run/apply engine — see `docs/DECISIONS.md` for the binding
+architecture rulings and `CLAUDE.md` for the full stack map.
 
 | Command | Description |
 |---|---|
 | `/watchlist_active` | List ACTIVE-tier symbols (the ones actually scanned for alerts) with their relevance score |
-| `/watchlist_monitor` | List MONITOR-tier symbols (tracked, not yet scanned) |
+| `/watchlist_monitor [N]` | List top-N scored MONITOR-tier symbols (tracked, not yet scanned; default 10, max 100) |
 | `/watchlist_context` | List ETF/index/crypto symbols (price context only, never scanned for BUY alerts) |
 | `/watchlist_ineligible` | List TEMPORARILY_INELIGIBLE symbols and why |
 | `/watchlist_status <SYMBOL>` | Full tier/score/streak detail for one symbol |
@@ -204,30 +214,37 @@ by a dry-run/apply engine — see `CLAUDE_CHANGES.md` and
 
 ---
 
-## 🚨 Alert System — 9 Gates
+## 🚨 Alert System — 7 Gates
 
-An alert is only sent when **all** of the following conditions are met:
+The 15-minute check runs only while the US market is open (9:30–16:00 ET),
+and scans the ACTIVE tier only. For each symbol, an alert fires only when
+**all seven** gates pass — all technical judgment comes from
+`full_analysis()`; the alert loop adds no indicator checks of its own:
 
-1. **Market is open** — checks US market hours (9:30–16:00 ET); controlled by `MARKET_OPEN_HOUR` / `MARKET_CLOSE_HOUR` in `config.py`
-2. **Score threshold** — composite buy score must be ≥ 65; controlled by `ALERT_MIN_SCORE`
-3. **Verdict filter** — verdict must be `BUY` or `STRONG BUY`; controlled by `ALERT_VERDICTS`
-4. **Price above EMA150** — hard veto: price must be above the 150-period EMA (trend filter)
-5. **RSI range** — RSI must be between 45 and 68 (not overbought, not oversold); controlled by `ALERT_RSI_MIN` / `ALERT_RSI_MAX`
-6. **Minimum price change** — intraday move must be at least +0.5%; controlled by `ALERT_MIN_PRICE_CHANGE`
-7. **Green candle confirmation** — the most recent candle must close above its open; controlled by `ALERT_REQUIRE_GREEN_CANDLE`
-8. **Cooldown guard** — no alert for the same symbol within the last 2 hours; controlled by `ALERT_COOLDOWN_HOURS`
-9. **Daily dedup** — in-memory session guard prevents duplicate alerts within the same process run
+1. **Price move** — intraday change ≥ +0.5%; controlled by `ALERT_MIN_PRICE_CHANGE`
+2. **Session dedup** — not already alerted in this process run (in-memory guard)
+3. **Daily cooldown** — at most one alert per symbol per UTC day, DB-backed (deliberately not configurable)
+4. **Data fetch** — a valid 1-year history fetch must succeed
+5. **Score & verdict** — legacy opportunity score ≥ 65 (`ALERT_MIN_SCORE`) and verdict `BUY` / `STRONG BUY` (`ALERT_VERDICTS`)
+6. **Required signals** — both `rsi_healthy_range` (RSI 45–65; `RSI_HEALTHY_MIN`/`RSI_HEALTHY_MAX`) and `volume_spike` must be triggered
+7. **Green candle confirmation** — the last completed candle closed above its open; controlled by `ALERT_REQUIRE_GREEN_CANDLE`
+
+Inside `full_analysis()` itself, the score is hard-vetoed to 0 unless price
+is above the **SMA150** and RSI is inside the 35–75 veto band
+(`RSI_VETO_MIN`/`RSI_VETO_MAX`).
 
 ---
 
-## 📊 Scoring System
+## 📊 Legacy Opportunity Score (drives alerting)
 
-The composite buy score (0–100) is built from 7 weighted components:
+The legacy opportunity score (0–100) is built from 7 weighted components.
+(Not to be confused with the separate composite engine below — the two use
+different scales and different BUY bars.)
 
 | Component | Points | Condition |
 |---|---|---|
-| Price above EMA150 | +20 | Always awarded if the veto gates pass |
-| EMA150 > EMA200 | +15 | Long-term uptrend confirmed |
+| Price above SMA150 | +20 | Always awarded if the veto gates pass |
+| SMA150 > SMA200 | +15 | Long-term uptrend confirmed |
 | MACD bullish crossover | +20 | Bullish crossover within the last 3 candles |
 | RSI in healthy zone | +15 | RSI between 45–65 (ideal swing range); +5 for fringe zone 35–45 / 65–75 |
 | Volume spike | +15 | Current volume > 1.5× the 20-day average |
@@ -245,53 +262,82 @@ The composite buy score (0–100) is built from 7 weighted components:
 
 ---
 
+## 🧪 Composite Engine & Position Management (advisory — not wired into alerts)
+
+`analyzers/composite.py` — a parallel scoring engine run alongside the
+legacy score for comparison, **not** for alerting: 4 layers × 25 points
+(trend/extension, momentum, volume, relative strength vs SPY) behind a
+two-part SMA hard gate, with a once-per-cycle SPY regime modifier (bull/bear
+adjusts the required RS ratio 1.0/1.2 and the BUY-flag bar 70/75) and
+score-keyed ATR stop sizing (2.0–3.0×). Computes on completed bars only.
+**Composite scores are not comparable to the legacy 0–100 score.**
+
+`analyzers/position_management.py` — advisory trailing-stop / exit module
+for open LONG positions, built on the composite engine's stop sizing:
+staged policy (<1R initial stop, ≥1R breakeven, >1.5R Chandelier 3.0× ATR,
+tightened to 2.5× when exit signals fire), monotonically non-decreasing
+stops, three advisory exit flags (bearish RSI divergence, climax volume,
+RSI ≥ 80), and a partial-exit suggestion at ≥2R.
+
+Surfaced read-only via CLI (`scripts/run_composite_scan.py`,
+`scripts/run_position_check.py`) and the `/composite` and `/position` bot
+commands. Nothing here executes trades or changes alerting behavior.
+
+---
+
 ## 🗂️ Watchlist Categories
 
-| Category | Symbols |
-|---|---|
-| מדדים (Indices) | ^GSPC, ^IXIC, QQQ, ^DJI, ^RUT, ^VIX |
-| קריפטו (Crypto) | BTC-USD, ETH-USD |
-| ETFs | SPY, VOO, QQQ, VGT, XLK, SOXX, CIBR, ARKK, SCHG, UFO, NUKZ |
-| AI & Semiconductors | NVDA, AMD, INTC, AVGO, ARM, QCOM, MRVL, ANET |
-| מגה טק (Mega Tech) | GOOGL, AMZN, MSFT, META, AAPL, TSLA, CBRS |
-| ענן ותוכנה (Cloud & Software) | SNOW, PLTR, DDOG, NET, CRM |
-| סייבר (Cybersecurity) | CRWD, PANW, FTNT, ZS, S |
-| תשתיות Data Center | EQIX, DLR, IRM, VRT, APLD, DOCN, GLW, ETN, MOD, CSCO |
-| חלל (Space) | RKLB, ASTS, LUNR, LMT, LHX, PL, BA, NOC |
-| אנרגיה (Energy) | XOM, CVX, COP, OXY |
-| גרעין (Nuclear) | CEG, VST, GEV, OKLO, SMR, CCJ, SO, BEP |
-| אנרגיה ירוקה (Green Energy) | BE, ENPH, FSLR, NEE |
-| פיננסים (Financials) | JPM, GS, MSTR |
+15 categories: indices (מדדים), crypto (קריפטו), ETFs, AI & Semiconductors,
+mega tech (מגה טק), cloud & software (ענן ותוכנה), cybersecurity (סייבר),
+data-center infrastructure, space & defense (חלל), energy (אנרגיה), nuclear
+(גרעין), green energy (אנרגיה ירוקה), financials (פיננסים), raw materials
+(חומרי גלם), and Quantum Computing (flagged **high volatility —
+speculative**; see the note in `config.py`).
+
+Membership is deliberately **not** listed here — after first-run seeding
+from `config.py`'s `WATCHLIST` dict, **the SQLite database is the source of
+truth** and membership changes nightly. See the live state with
+`/watchlist` (per-category summary), `/watchlist_active`, and
+`/watchlist_monitor`.
 
 ---
 
 ## 🖥️ Running on Windows (24/7)
 
-To keep StockSage running in the background after you close your terminal, use a `.vbs` launcher script:
+Deployment is supervised by **Windows Task Scheduler** — one-time setup from
+an **elevated** PowerShell (it prompts for your Windows password to store
+the "run whether logged on or not" credential):
 
-**1. Create `start_stocksage.vbs`** in the project root:
-
-```vbs
-Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run "cmd /c cd /d C:\path\to\StockSage_V2 && stocksage\venv\Scripts\python.exe stocksage\main.py >> stocksage\log.txt 2>&1", 0, False
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\register_scheduled_tasks.ps1
 ```
 
-**2. Run it silently** by double-clicking the `.vbs` file — no console window will appear.
+This registers four tasks (re-running is safe; re-run it whenever your
+Windows password changes):
 
-**3. Auto-start on login** — press `Win + R`, type `shell:startup`, and copy the `.vbs` file into the Startup folder.
+| Task | Schedule | Purpose |
+|---|---|---|
+| StockSage Bot | at startup | crash-restart supervisor loop around `main.py` (`scripts/run_bot_supervisor.cmd`) |
+| StockSage Populate Outcomes | daily 02:00 | fills `alert_outcomes` after US close (`scripts/populate_outcomes.py`) |
+| StockSage Watchlist Evaluation | daily 02:30 | nightly eligibility evaluation in apply mode |
+| StockSage Auto Sync | every 15 min | `git pull --ff-only` from origin/main + bot restart when new commits land |
 
-**4. Check the log** at `stocksage/log.txt` to monitor activity and debug issues.
+**Do not also launch `python main.py` manually while the tasks are
+registered** — two instances fight over Telegram polling.
+
+Logs: `logs/stocksage.log` (application, rotating), `logs/bot_supervisor.log`
+(process starts/exits), `logs/auto_sync.log`, and
+`logs/watchlist_evaluation_task.log`. Optional: set `HEALTHCHECK_PING_URL`
+for a dead-man's-switch ping after every successful agent cycle.
 
 ---
 
 ## 📝 License
 
-MIT License — see [LICENSE](../LICENSE) for details.
+MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
 ## ⚠️ Disclaimer
 
 StockSage is built for **educational and research purposes only**. It is not financial advice, and nothing in this project should be construed as a recommendation to buy or sell any security. Trading stocks involves significant risk. Past performance of any signal, score, or indicator does not guarantee future results. Always do your own research and consult a qualified financial advisor before making investment decisions.
-
-test 2
