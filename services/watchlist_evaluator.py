@@ -53,6 +53,12 @@ Recovery semantics (TEMPORARILY_INELIGIBLE -> MONITOR):
   to ACTIVE in the same cycle — that recovery transition is implemented
   here, in this module, rather than changing the shared, already-tested
   determine_state_change() contract used elsewhere.
+  Recovery requires BOTH a successful re-fetch AND the hard
+  disqualifications clearing (2026-07-15 fix): a symbol whose data is back
+  but whose price is still below the eligibility floor stays
+  TEMPORARILY_INELIGIBLE with a refreshed reason and a new reeval_date —
+  force-recovering it used to cause a permanent nightly
+  INELIGIBLE <-> MONITOR oscillation for sub-floor symbols.
 
 Provider-outage suppression (documented scope):
   Only ACTIVE -> MONITOR demotions caused by a genuinely low relevance
@@ -248,6 +254,16 @@ def _price_data_from_result(market_result) -> dict:
     }
 
 
+def _ineligible_reeval_date(market_result) -> str:
+    """Next retry date for a TEMPORARILY_INELIGIBLE write: the provider's
+    retry_after if it gave one, else now + MARKET_DATA_DATA_QUALITY_RETRY_HOURS."""
+    if market_result is not None and market_result.retry_after_utc:
+        return market_result.retry_after_utc.split(" ")[0]
+    return (
+        datetime.now(timezone.utc) + timedelta(hours=MARKET_DATA_DATA_QUALITY_RETRY_HOURS)
+    ).date().isoformat()
+
+
 def _build_db_fields(
     row: dict, market_result, score: int, current_state: str,
     proposed_state: str, reason: str, now_str: str,
@@ -294,7 +310,15 @@ def _build_db_fields(
             else:
                 fields["consec_demote_count"] = 0
             fields["dwell_days"] = row["dwell_days"] + 1
-        fields["exclusion_reason"] = ""
+        if current_state == "TEMPORARILY_INELIGIBLE":
+            # Still ineligible after a due retry: refresh the reason and
+            # schedule the next retry. (Previously this branch wiped
+            # exclusion_reason and left reeval_date stale, producing
+            # reason-less rows that were re-fetched every night.)
+            fields["exclusion_reason"] = reason
+            fields["reeval_date"] = _ineligible_reeval_date(market_result)
+        else:
+            fields["exclusion_reason"] = ""
         return fields
 
     # A real transition: reset the streak counters and dwell time, and
@@ -315,14 +339,7 @@ def _build_db_fields(
         fields["reeval_date"] = None
     elif proposed_state == "TEMPORARILY_INELIGIBLE":
         fields["exclusion_reason"] = reason
-        retry_date = None
-        if market_result is not None and market_result.retry_after_utc:
-            retry_date = market_result.retry_after_utc.split(" ")[0]
-        if retry_date is None:
-            retry_date = (
-                datetime.now(timezone.utc) + timedelta(hours=MARKET_DATA_DATA_QUALITY_RETRY_HOURS)
-            ).date().isoformat()
-        fields["reeval_date"] = retry_date
+        fields["reeval_date"] = _ineligible_reeval_date(market_result)
 
     return fields
 
@@ -708,8 +725,9 @@ def _run(
             _set_db_fields(sr, row, mr, sr.relevance_score, "MONITOR", "MONITOR", sr.reason, now_str)
         results_by_symbol[sym] = sr
 
-    # TEMPORARILY_INELIGIBLE candidates whose retry time has arrived. A
-    # successful re-fetch recovers them to MONITOR only — never a direct
+    # TEMPORARILY_INELIGIBLE candidates whose retry time has arrived.
+    # Recovery to MONITOR requires BOTH a successful re-fetch AND the hard
+    # disqualifications clearing (price floor etc.) — and is never a direct
     # promotion to ACTIVE in the same cycle (see module docstring).
     ineligible_due_candidates = sorted(
         (row for row in candidates if row["symbol"] in ineligible_symbols), key=lambda r: r["symbol"]
@@ -733,15 +751,33 @@ def _run(
             active_count=0, active_bank_count=0, lowest_active_score=None,
         )
         sr.relevance_score = eval_out["score"]
-        sr.hard_eligibility_passed = True
         if _is_pinned(row):
             # Pin invariant self-heal: pinned symbols skip the
             # recover-to-MONITOR-first rule and return straight to ACTIVE.
+            sr.hard_eligibility_passed = True
             sr.proposed_state = "ACTIVE"
             sr.reason = "pinned: restored to ACTIVE after data recovery (pin invariant)"
             _set_db_fields(sr, row, mr, sr.relevance_score, "TEMPORARILY_INELIGIBLE", "ACTIVE", sr.reason, now_str)
             tracker.add(sym, _PROTECTED_SCORE, _is_bank(row["categories"]))
+        elif eval_out["new_state"] == "TEMPORARILY_INELIGIBLE":
+            # The fetch succeeded but a hard disqualification still holds
+            # (price below the eligibility floor, or no usable price).
+            # "Recovery" means the outage cleared, not the disqualification —
+            # force-recovering here caused a permanent nightly
+            # INELIGIBLE <-> MONITOR oscillation for sub-floor symbols.
+            # Stay ineligible with a fresh reason and a new reeval_date;
+            # deliberately NOT counted as a recovery.
+            sr.hard_eligibility_passed = False
+            sr.proposed_state = "TEMPORARILY_INELIGIBLE"
+            sr.reason = f"still ineligible: {eval_out['reason']}"
+            _set_db_fields(
+                sr, row, mr, sr.relevance_score,
+                "TEMPORARILY_INELIGIBLE", "TEMPORARILY_INELIGIBLE", sr.reason, now_str,
+            )
+            results_by_symbol[sym] = sr
+            continue
         else:
+            sr.hard_eligibility_passed = True
             sr.proposed_state = "MONITOR"
             sr.reason = "recovered: data valid again; returning to MONITOR for normal promotion cycle"
             _set_db_fields(sr, row, mr, sr.relevance_score, "TEMPORARILY_INELIGIBLE", "MONITOR", sr.reason, now_str)
@@ -1072,13 +1108,27 @@ def explain_symbol(symbol: str, *, client: MarketDataClient | None = None) -> di
         },
     }
     if row["wl_state"] == "TEMPORARILY_INELIGIBLE":
-        # Mirrors _run()'s real recovery rule: a TEMPORARILY_INELIGIBLE
-        # symbol with valid data again always lands in MONITOR first, never
-        # directly in ACTIVE in the same cycle — determine_state_change()
-        # alone (used for the generic eval_out above) doesn't know this
-        # special case, so it's corrected here for display accuracy only.
-        result["would_be_state"] = "MONITOR"
-        result["would_be_reason"] = "recovered: data valid again; would return to MONITOR first (never directly to ACTIVE)"
+        # Mirrors _run()'s real recovery rule (display accuracy only). The
+        # recovery loop re-evaluates the symbol AS IF it were MONITOR — the
+        # generic eval_out above used the real TEMPORARILY_INELIGIBLE state,
+        # for which determine_state_change() always answers "no change", so
+        # it can't be used to detect a persisting hard disqualification.
+        recovery_state, recovery_reason = determine_state_change(
+            current_state="MONITOR", new_score=eval_out["score"],
+            consec_promote=0, consec_demote=0, dwell_days=0,
+            security_type=sec_type, price_data=price_data, avg_volume=avg_volume,
+            is_bank=_is_bank(row["categories"]),
+            active_count=len(active_symbols), active_bank_count=active_bank_count,
+            lowest_active_score=lowest_active_score,
+        )
+        if recovery_state == "TEMPORARILY_INELIGIBLE":
+            result["would_be_state"] = "TEMPORARILY_INELIGIBLE"
+            result["would_be_reason"] = f"still ineligible: {recovery_reason}"
+        else:
+            # Recovery lands in MONITOR first, never directly in ACTIVE in
+            # the same cycle — even if the MONITOR-based check said ACTIVE.
+            result["would_be_state"] = "MONITOR"
+            result["would_be_reason"] = "recovered: data valid again; would return to MONITOR first (never directly to ACTIVE)"
     else:
         result["would_be_state"] = eval_out["new_state"]
         result["would_be_reason"] = eval_out["reason"]
