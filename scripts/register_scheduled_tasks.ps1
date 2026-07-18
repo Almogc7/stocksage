@@ -27,9 +27,14 @@ if (-not $isAdmin) {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
-$pythonExe = "C:\Users\FIBI\AppData\Local\Programs\Python\Python313\python.exe"
-if (-not (Test-Path $pythonExe)) {
-    Write-Warning "python.exe not found at $pythonExe -- run_bot_supervisor.cmd falls back to PATH, but double check python is installed for this account."
+# Resolved dynamically (not hardcoded) so this check stays valid across
+# machines, accounts, and Python versions -- run_bot_supervisor.cmd resolves
+# python.exe the same way, via `where python` on PATH.
+$pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+if (-not $pythonCommand) {
+    Write-Warning "python.exe not found on PATH -- run_bot_supervisor.cmd resolves python the same way (via 'where python'), so double check python is installed and on PATH for this account."
+} else {
+    Write-Host "Found python.exe on PATH: $($pythonCommand.Source)"
 }
 
 $user = "$env:COMPUTERNAME\$env:USERNAME"

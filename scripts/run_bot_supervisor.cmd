@@ -13,8 +13,15 @@ REM here; the loop running forever is the point.
 cd /d "%~dp0.."
 if not exist logs mkdir logs
 
-set PYTHON_EXE=C:\Users\FIBI\AppData\Local\Programs\Python\Python313\python.exe
-if not exist "%PYTHON_EXE%" set PYTHON_EXE=python
+REM Resolve python.exe dynamically from PATH so this never breaks when the
+REM machine, Windows account, or Python version changes. "where" returns one
+REM full path per line if several pythons are on PATH; take the first.
+set PYTHON_EXE=python
+for /f "delims=" %%P in ('where python 2^>nul') do (
+    set PYTHON_EXE=%%P
+    goto :python_resolved
+)
+:python_resolved
 
 :loop
 echo ===== [%date% %time%] main.py starting ===== >> logs\bot_supervisor.log
