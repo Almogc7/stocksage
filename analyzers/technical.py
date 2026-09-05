@@ -1,7 +1,15 @@
 import pandas as pd
 import ta
 
+from analyzers.composite import volume_layer_points
 from config import RSI_HEALTHY_MAX, RSI_HEALTHY_MIN, RSI_VETO_MAX, RSI_VETO_MIN
+
+# Combined relvol_pts + obv_pts (out of a 25-pt volume layer) required to
+# trigger the composite-style volume_spike signal -- half the layer, so a
+# full 1.5x relative-volume day still qualifies on its own (15/15), or a
+# more moderate ~1.17x+ day paired with a rising OBV slope also clears it
+# (5 relvol + 10 obv = 15). Opt-in only; see full_analysis(use_composite_volume=).
+_COMPOSITE_VOLUME_TRIGGER = 15.0
 
 
 def _flatten(df: pd.DataFrame) -> pd.DataFrame:
@@ -45,6 +53,15 @@ def _volume_spike(df: pd.DataFrame, multiplier: float = 1.5, window: int = 20) -
     avg_vol = float(df["volume"].iloc[-window - 1:-1].mean())
     curr_vol = float(df["volume"].iloc[-1])
     return avg_vol > 0 and curr_vol > multiplier * avg_vol
+
+
+def _volume_spike_composite(df: pd.DataFrame, market_open: bool = False) -> bool:
+    """Session-normalized relative volume + OBV slope, reusing
+    analyzers.composite.volume_layer_points() instead of comparing raw
+    volume to a full-day average. Not used by default -- see
+    full_analysis(use_composite_volume=)."""
+    layer = volume_layer_points(df, market_open=market_open)
+    return (layer["relvol_pts"] + layer["obv_pts"]) >= _COMPOSITE_VOLUME_TRIGGER
 
 
 def _stoch_rsi_bullish(df: pd.DataFrame) -> bool:
@@ -243,7 +260,15 @@ def calc_swing_levels(df: pd.DataFrame, lookback: int = 50) -> dict:
 
 # ── Full Analysis ─────────────────────────────────────────────────────────────
 
-def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
+def full_analysis(symbol: str, df: pd.DataFrame, current_price: float,
+                  use_composite_volume: bool = False, market_open: bool = False) -> dict:
+    """use_composite_volume: opt-in only, default False -- every existing
+    caller (check_alerts(), the bot, the dashboard, eligibility,
+    watchlist_evaluator) is unaffected unless it explicitly passes True.
+    When True, the volume_spike triggered-signal comes from
+    _volume_spike_composite() instead of the raw 1.5x-average boolean.
+    market_open only matters when use_composite_volume=True (session-fraction
+    normalization); it is not threaded into the live alert loop."""
     df = _flatten(df)
 
     # Compute all indicators up front so every return path has the full key set.
@@ -324,8 +349,13 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float) -> dict:
         score += 5
         triggered.append("rsi_acceptable_zone")
 
-    # +15  Volume spike — current volume > 1.5× 20-day average
-    if _volume_spike(df):
+    # +15  Volume spike — current volume > 1.5× 20-day average (or, when
+    #      use_composite_volume=True, the session-normalized relvol+OBV check)
+    volume_spike_triggered = (
+        _volume_spike_composite(df, market_open=market_open) if use_composite_volume
+        else _volume_spike(df)
+    )
+    if volume_spike_triggered:
         score += 15
         triggered.append("volume_spike")
 

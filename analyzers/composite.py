@@ -277,6 +277,45 @@ def _stop_multiplier(total_score: float) -> float:
     return 2.0
 
 
+# ── Volume layer (shared with analyzers/technical.py) ─────────────────────────
+
+def volume_layer_points(df: pd.DataFrame, market_open: bool = False,
+                        now: datetime | None = None) -> dict:
+    """Session-normalized relative volume + OBV slope, capped at _LAYER_MAX.
+
+    Extracted out of composite_score() so other callers (technical.py's
+    volume_spike check) can reuse the same session-fraction normalization
+    instead of comparing raw volume to a full-day average -- the fix for the
+    early-session false-negative described in compute_market_context()'s
+    module docstring. df may include the in-progress bar; pass
+    market_open=True during the session so it is normalized correctly.
+    """
+    df = _flatten(df)
+    completed = _completed_bars(df, market_open)
+    closes = completed["close"]
+    volumes = completed["volume"] if "volume" in completed.columns else pd.Series(dtype=float)
+
+    fraction = _session_fraction(now, market_open)
+    if market_open and len(df) >= 2 and "volume" in df.columns:
+        measured_vol = float(df["volume"].iloc[-1])          # in-progress bar
+        base = volumes.iloc[-_VOLUME_AVG_WINDOW:]            # 20 completed bars
+    else:
+        measured_vol = float(volumes.iloc[-1]) if len(volumes) else 0.0
+        base = volumes.iloc[-_VOLUME_AVG_WINDOW - 1:-1]      # 20 bars before it
+    avg_vol = float(base.mean()) if len(base) >= _VOLUME_AVG_WINDOW else 0.0
+    rel_vol = measured_vol / (avg_vol * fraction) if avg_vol > 0 else 0.0
+    relvol_pts = _relvol_points(rel_vol)
+    obv_slope = _obv_slope(closes, volumes) if len(volumes) else None
+    obv_pts = 10.0 if (obv_slope is not None and obv_slope > 0) else 0.0
+    points = min(float(_LAYER_MAX), relvol_pts + obv_pts)
+    return {
+        "points": points, "max": _LAYER_MAX,
+        "relvol_pts": relvol_pts, "obv_pts": obv_pts,
+        "rel_vol": rel_vol, "session_fraction": fraction,
+        "obv_slope": obv_slope,
+    }
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def composite_score(symbol: str, df: pd.DataFrame, context: dict,
@@ -364,19 +403,13 @@ def composite_score(symbol: str, df: pd.DataFrame, context: dict,
     # ── Volume layer ──────────────────────────────────────────────────────────
     # Relative volume measures the LIVE bar during the session (normalized by
     # session fraction); after the close it measures the last completed bar.
-    fraction = _session_fraction(now, market_open)
-    if market_open and len(df) >= 2 and "volume" in df.columns:
-        measured_vol = float(df["volume"].iloc[-1])          # in-progress bar
-        base = volumes.iloc[-_VOLUME_AVG_WINDOW:]            # 20 completed bars
-    else:
-        measured_vol = float(volumes.iloc[-1]) if len(volumes) else 0.0
-        base = volumes.iloc[-_VOLUME_AVG_WINDOW - 1:-1]      # 20 bars before it
-    avg_vol = float(base.mean()) if len(base) >= _VOLUME_AVG_WINDOW else 0.0
-    rel_vol = measured_vol / (avg_vol * fraction) if avg_vol > 0 else 0.0
-    relvol_pts = _relvol_points(rel_vol)
-    obv_slope = _obv_slope(closes, volumes) if len(volumes) else None
-    obv_pts = 10.0 if (obv_slope is not None and obv_slope > 0) else 0.0
-    volume_pts = min(float(_LAYER_MAX), relvol_pts + obv_pts)
+    vol_layer = volume_layer_points(df, market_open=market_open, now=now)
+    volume_pts = vol_layer["points"]
+    relvol_pts = vol_layer["relvol_pts"]
+    obv_pts = vol_layer["obv_pts"]
+    rel_vol = vol_layer["rel_vol"]
+    fraction = vol_layer["session_fraction"]
+    obv_slope = vol_layer["obv_slope"]
 
     # ── Relative strength layer ──────────────────────────────────────────────
     rs = _rs_ratio(closes, context.get("spy_closes"))
