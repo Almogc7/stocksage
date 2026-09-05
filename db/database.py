@@ -363,6 +363,55 @@ def migrate_db() -> None:
             )
         """)
 
+        # v10 tables — silent, observation-mode-only logging of composite
+        # engine (analyzers/composite.py) BUY-flag signals for the ACTIVE
+        # tier, plus their forward-return outcomes. Written by
+        # scripts/log_composite_signals.py / scripts/populate_composite_signal_
+        # outcomes.py (Task Scheduler, see docs/composite_vs_legacy_tracking.md
+        # 2026-09-05 entries). Never read by check_alerts() or any live path.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS composite_signals (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol          TEXT    NOT NULL,
+                signal_date     TEXT    NOT NULL,
+                regime          TEXT    NOT NULL,
+                total_score     REAL    NOT NULL,
+                required_score  INTEGER NOT NULL,
+                trend_pts       REAL    NOT NULL,
+                momentum_pts    REAL    NOT NULL,
+                volume_pts      REAL    NOT NULL,
+                rs_pts          REAL    NOT NULL,
+                rs_ratio        REAL,
+                required_rs     REAL    NOT NULL,
+                price           REAL    NOT NULL,
+                atr             REAL,
+                stop_price      REAL,
+                stop_multiplier REAL,
+                logged_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (symbol, signal_date)
+            )
+        """)
+
+        # Outcome semantics mirror alert_outcomes (populate_outcomes.py's
+        # compute_outcome(), called with take_profit=inf since the composite
+        # engine's stop dict has no TP — first_barrier_hit therefore only
+        # ever lands on 'stop_loss' or 'none', never 'take_profit').
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS composite_signal_outcomes (
+                signal_id             INTEGER PRIMARY KEY REFERENCES composite_signals(id),
+                close_t1              REAL,
+                close_t3              REAL,
+                close_t5              REAL,
+                close_t10             REAL,
+                max_adverse_excursion REAL,
+                first_barrier_hit     TEXT CHECK(
+                    first_barrier_hit IN ('stop_loss', 'none')
+                ),
+                r_multiple            REAL,
+                computed_at           TIMESTAMP
+            )
+        """)
+
         # v2 table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS symbol_categories (
@@ -1134,6 +1183,82 @@ def upsert_alert_outcome(alert_id: int, outcome: dict) -> None:
                  computed_at           = excluded.computed_at""",
             (
                 alert_id,
+                outcome.get("close_t1"),
+                outcome.get("close_t3"),
+                outcome.get("close_t5"),
+                outcome.get("close_t10"),
+                outcome.get("max_adverse_excursion"),
+                outcome.get("first_barrier_hit"),
+                outcome.get("r_multiple"),
+                _utc_now_str(),
+            ),
+        )
+
+
+def log_composite_signal(
+    symbol: str, signal_date: str, regime: str, total_score: float,
+    required_score: int, trend_pts: float, momentum_pts: float,
+    volume_pts: float, rs_pts: float, rs_ratio: float | None,
+    required_rs: float, price: float, atr: float | None,
+    stop_price: float | None, stop_multiplier: float | None,
+) -> int | None:
+    """Insert one composite_signals row; returns its id, or None if a row
+    for (symbol, signal_date) already exists (idempotent re-run — a
+    completed trading day's bars never change, so the first write stands).
+    """
+    with _connect() as conn:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO composite_signals
+               (symbol, signal_date, regime, total_score, required_score,
+                trend_pts, momentum_pts, volume_pts, rs_pts, rs_ratio,
+                required_rs, price, atr, stop_price, stop_multiplier)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                symbol.upper(), signal_date, regime, total_score, required_score,
+                trend_pts, momentum_pts, volume_pts, rs_pts, rs_ratio,
+                required_rs, price, atr, stop_price, stop_multiplier,
+            ),
+        )
+        return cur.lastrowid if cur.rowcount > 0 else None
+
+
+def get_composite_signals_pending_outcomes() -> list[dict]:
+    """composite_signals rows whose outcome row is missing or incomplete —
+    same "complete once close_t10 is non-NULL" convention as
+    get_alerts_pending_outcomes(), which is what makes the nightly
+    populate_composite_signal_outcomes.py job idempotent."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT s.id AS signal_id, s.symbol, s.signal_date,
+                      s.price, s.stop_price
+               FROM composite_signals s
+               LEFT JOIN composite_signal_outcomes o ON o.signal_id = s.id
+               WHERE o.signal_id IS NULL OR o.close_t10 IS NULL
+               ORDER BY s.signal_date""",
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def upsert_composite_signal_outcome(signal_id: int, outcome: dict) -> None:
+    """Insert or fully replace the outcome row for one composite signal —
+    same whole-row-upsert convention as upsert_alert_outcome()."""
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO composite_signal_outcomes
+               (signal_id, close_t1, close_t3, close_t5, close_t10,
+                max_adverse_excursion, first_barrier_hit, r_multiple, computed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(signal_id) DO UPDATE SET
+                 close_t1              = excluded.close_t1,
+                 close_t3              = excluded.close_t3,
+                 close_t5              = excluded.close_t5,
+                 close_t10             = excluded.close_t10,
+                 max_adverse_excursion = excluded.max_adverse_excursion,
+                 first_barrier_hit     = excluded.first_barrier_hit,
+                 r_multiple            = excluded.r_multiple,
+                 computed_at           = excluded.computed_at""",
+            (
+                signal_id,
                 outcome.get("close_t1"),
                 outcome.get("close_t3"),
                 outcome.get("close_t5"),
