@@ -207,11 +207,24 @@ class TestRsRatio(unittest.TestCase):
         self.assertIsNone(comp._rs_ratio(self._closes(100, 110), None, window=60))
 
     def test_rs_points_regime_thresholds(self):
-        self.assertEqual(comp._rs_points(1.05, required_rs=1.0), 25.0)  # bull: full
+        # Full marks now require clearing required_rs by COMPOSITE_RS_CEILING_MARGIN
+        # (0.15 default), not merely reaching required_rs — see
+        # docs/composite_vs_legacy_tracking.md 2026-09-05 check.
+        self.assertLess(comp._rs_points(1.05, required_rs=1.0), 25.0)    # bull: just above bar, partial
+        self.assertGreater(comp._rs_points(1.05, required_rs=1.0), 0.0)
+        self.assertEqual(comp._rs_points(1.15, required_rs=1.0), 25.0)   # bull: at the ceiling, full
         self.assertLess(comp._rs_points(1.05, required_rs=1.2), 25.0)   # bear: partial
         self.assertGreater(comp._rs_points(1.05, required_rs=1.2), 0.0)
         self.assertEqual(comp._rs_points(0.8, required_rs=1.0), 0.0)
         self.assertEqual(comp._rs_points(None, required_rs=1.0), 0.0)
+
+    def test_rs_points_margin_more_credit_than_bare_threshold(self):
+        """A bigger margin above required_rs must score strictly higher —
+        the whole point of replacing the flat ceiling."""
+        just_qualifies = comp._rs_points(1.00, required_rs=1.0)
+        big_margin = comp._rs_points(1.20, required_rs=1.0)
+        self.assertLess(just_qualifies, big_margin)
+        self.assertEqual(big_margin, 25.0)
 
 
 class TestStopMultiplier(unittest.TestCase):
@@ -234,16 +247,31 @@ class TestMarketContext(unittest.TestCase):
         return df
 
     def test_bull_regime_thresholds(self):
+        # This fixture's synthetic uptrend puts SPY ~8.95% above its own
+        # SMA150 — past COMPOSITE_SPY_STRONG_EXTENSION_PCT (8.0), so
+        # required_rs picks up a small regime bump above the 1.0 base.
         ctx = comp.compute_market_context(spy_df=self._spy_df(rising=True), market_open=False)
         self.assertEqual(ctx["regime"], "BULL")
-        self.assertEqual(ctx["required_rs"], 1.0)
+        self.assertEqual(ctx["required_rs_base"], 1.0)
+        self.assertGreaterEqual(ctx["required_rs"], 1.0)
+        self.assertLessEqual(ctx["required_rs"], 1.0 + 0.15)  # COMPOSITE_RS_REGIME_MAX_BUMP cap
         self.assertEqual(ctx["required_score"], 70)
 
     def test_bear_regime_thresholds(self):
+        # SPY is below its own SMA150 here, so the regime bump (which only
+        # fires when SPY sits ABOVE the strong-extension threshold) is 0.
         ctx = comp.compute_market_context(spy_df=self._spy_df(rising=False), market_open=False)
         self.assertEqual(ctx["regime"], "BEAR")
         self.assertEqual(ctx["required_rs"], 1.2)
+        self.assertEqual(ctx["required_rs_regime_bump"], 0.0)
         self.assertEqual(ctx["required_score"], 75)
+
+    def test_regime_bump_capped(self):
+        """An extreme SPY extension must not push required_rs past base + cap."""
+        from config import COMPOSITE_RS_REGIME_MAX_BUMP
+        extreme_df = make_trending_df(n=252, trend=0.01)  # far past any realistic extension
+        ctx = comp.compute_market_context(spy_df=extreme_df, market_open=False)
+        self.assertLessEqual(ctx["required_rs"], ctx["required_rs_base"] + COMPOSITE_RS_REGIME_MAX_BUMP + 1e-9)
 
     def test_missing_spy_falls_back_to_strict(self):
         """No SPY data must never loosen the bar: bear thresholds apply."""

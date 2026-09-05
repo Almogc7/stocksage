@@ -44,9 +44,13 @@ from config import (
     COMPOSITE_RELVOL_FULL,
     COMPOSITE_REQUIRED_SCORE_BEAR,
     COMPOSITE_REQUIRED_SCORE_BULL,
+    COMPOSITE_RS_CEILING_MARGIN,
+    COMPOSITE_RS_REGIME_BUMP_RATE,
+    COMPOSITE_RS_REGIME_MAX_BUMP,
     COMPOSITE_RS_REQUIRED_BEAR,
     COMPOSITE_RS_REQUIRED_BULL,
     COMPOSITE_RS_WINDOW_DAYS,
+    COMPOSITE_SPY_STRONG_EXTENSION_PCT,
     RSI_HEALTHY_MAX,
     RSI_HEALTHY_MIN,
     RSI_VETO_MAX,
@@ -122,12 +126,27 @@ def compute_market_context(spy_df: pd.DataFrame | None = None,
         return context
 
     bull = close > sma150
+    base_required_rs = COMPOSITE_RS_REQUIRED_BULL if bull else COMPOSITE_RS_REQUIRED_BEAR
+
+    # Regime-adjusted RS requirement: when SPY itself is far above its own
+    # SMA150, merely keeping pace with SPY is a lower bar than usual, so
+    # required_rs scales up (capped). See COMPOSITE_SPY_STRONG_EXTENSION_PCT.
+    spy_pct_above_sma150 = (close - sma150) / sma150 * 100.0
+    regime_bump = min(
+        COMPOSITE_RS_REGIME_MAX_BUMP,
+        COMPOSITE_RS_REGIME_BUMP_RATE * max(0.0, spy_pct_above_sma150 - COMPOSITE_SPY_STRONG_EXTENSION_PCT),
+    )
+    required_rs = round(base_required_rs + regime_bump, 4)
+
     context.update({
         "regime": "BULL" if bull else "BEAR",
         "spy_available": True,
         "spy_close": round(close, 4),
         "spy_sma150": round(sma150, 4),
-        "required_rs": COMPOSITE_RS_REQUIRED_BULL if bull else COMPOSITE_RS_REQUIRED_BEAR,
+        "spy_pct_above_sma150": round(spy_pct_above_sma150, 2),
+        "required_rs": required_rs,
+        "required_rs_base": base_required_rs,
+        "required_rs_regime_bump": round(regime_bump, 4),
         "required_score": COMPOSITE_REQUIRED_SCORE_BULL if bull else COMPOSITE_REQUIRED_SCORE_BEAR,
         "spy_closes": spy["close"],
     })
@@ -256,15 +275,22 @@ def _rs_ratio(stock_closes: pd.Series, spy_closes: pd.Series | None,
 
 
 def _rs_points(rs: float | None, required_rs: float) -> float:
-    """Linear ramp from 0 at RS <= 0.8 to full 25 at RS >= required_rs.
-    The regime raises/lowers where 'full' sits — it never disqualifies."""
+    """Linear ramp from 0 at RS <= 0.8 to full 25 at RS >= required_rs +
+    COMPOSITE_RS_CEILING_MARGIN. The regime (and, since 2026-09-05, how far
+    SPY itself sits above its own SMA150) raises/lowers where the ramp sits
+    — it never disqualifies. Previously the ramp flattened to 25 exactly at
+    required_rs, so a razor-thin edge over SPY scored identically to a large
+    one (see docs/composite_vs_legacy_tracking.md, 2026-09-05 check, IRM's 4
+    composite-exclusive fires); the ceiling now sits meaningfully above the
+    bar so magnitude of outperformance earns its own credit."""
     if rs is None:
         return 0.0
-    if rs >= required_rs:
+    ceiling = required_rs + COMPOSITE_RS_CEILING_MARGIN
+    if rs >= ceiling:
         return 25.0
     if rs <= 0.8:
         return 0.0
-    return 25.0 * (rs - 0.8) / (required_rs - 0.8)
+    return 25.0 * (rs - 0.8) / (ceiling - 0.8)
 
 
 def _stop_multiplier(total_score: float) -> float:

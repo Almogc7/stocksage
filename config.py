@@ -462,6 +462,25 @@ COMPOSITE_RS_REQUIRED_BEAR: float = float(os.getenv("COMPOSITE_RS_REQUIRED_BEAR"
 COMPOSITE_REQUIRED_SCORE_BULL: int = int(os.getenv("COMPOSITE_REQUIRED_SCORE_BULL", "70"))
 COMPOSITE_REQUIRED_SCORE_BEAR: int = int(os.getenv("COMPOSITE_REQUIRED_SCORE_BEAR", "75"))
 
+# RS layer scoring (2026-09-05 diagnostic): full 25 pts used to be a flat
+# ceiling at rs_ratio >= required_rs, giving identical credit to a razor-thin
+# edge over SPY and a large one. Full points now require clearing required_rs
+# by this margin; the ramp from 0 (at rs_ratio=0.8) to 25 stretches out to
+# required_rs + this value instead of stopping at required_rs.
+COMPOSITE_RS_CEILING_MARGIN: float = float(os.getenv("COMPOSITE_RS_CEILING_MARGIN", "0.15"))
+
+# Regime-adjusted RS requirement: when SPY itself is more than this % above
+# its own SMA150, "merely keeping pace" with SPY is a lower bar than usual,
+# so required_rs scales up. 8.0% ~= the 75th percentile of SPY's pct-above-
+# SMA150 over its trailing 3y (calibrated off SPY's own history, not tuned
+# to any specific diagnostic window).
+COMPOSITE_SPY_STRONG_EXTENSION_PCT: float = float(os.getenv("COMPOSITE_SPY_STRONG_EXTENSION_PCT", "8.0"))
+# required_rs bump per percentage point SPY sits above that threshold
+COMPOSITE_RS_REGIME_BUMP_RATE: float = float(os.getenv("COMPOSITE_RS_REGIME_BUMP_RATE", "0.02"))
+# Cap on the total regime bump, so an extreme SPY extension can't push
+# required_rs absurdly high
+COMPOSITE_RS_REGIME_MAX_BUMP: float = float(os.getenv("COMPOSITE_RS_REGIME_MAX_BUMP", "0.15"))
+
 # Relative volume at which the volume component reaches full points
 # (session-elapsed normalized — see composite.py _session_fraction)
 COMPOSITE_RELVOL_FULL: float = float(os.getenv("COMPOSITE_RELVOL_FULL", "1.5"))
