@@ -1,4 +1,4 @@
-# One-time setup: registers all four StockSage scheduled tasks on THIS
+# One-time setup: registers all six StockSage scheduled tasks on THIS
 # machine. Run this yourself, interactively, in a PowerShell window --
 # it prompts for your Windows account password to store the "run whether
 # logged on or not" credential. The password is decrypted only in-memory
@@ -6,13 +6,23 @@
 #
 # Re-running is safe: existing tasks with the same names are replaced
 # (-Force). If your Windows password ever changes, re-run this script --
-# all four tasks will otherwise silently fail to start.
+# all six tasks will otherwise silently fail to start.
 #
 # Tasks registered:
-#   StockSage Bot                 - at startup, crash-restart loop (main.py)
-#   StockSage Populate Outcomes   - daily 02:00
-#   StockSage Watchlist Evaluation- daily 02:30 (scheduled-apply mode)
-#   StockSage Auto Sync           - every 15 minutes
+#   StockSage Bot                       - at startup, crash-restart loop (main.py)
+#   StockSage Log Composite Signals     - daily 01:30 (observation-mode only,
+#                                          see docs/composite_vs_legacy_tracking.md)
+#   StockSage Populate Outcomes         - daily 02:00
+#   StockSage Populate Composite Outcomes - daily 02:15 (observation-mode only)
+#   StockSage Watchlist Evaluation      - daily 02:30 (scheduled-apply mode)
+#   StockSage Auto Sync                 - every 15 minutes
+#
+# The 01:30/02:00/02:15/02:30 spacing is deliberate: composite signals are
+# logged BEFORE the 02:30 watchlist evaluation reassigns ACTIVE-tier
+# membership (so "ACTIVE tier" in that job means today's session, not
+# tonight's promotions/demotions), and each nightly job gets a clean,
+# non-overlapping window. Same fixed-IL-local-time convention (and the
+# same US/IL DST-mismatch limitation, see CLAUDE.md) as the existing jobs.
 
 $ErrorActionPreference = "Stop"
 
@@ -64,21 +74,35 @@ try {
         -Settings $settings -User $user -Password $password -RunLevel Limited -Force | Out-Null
     Write-Host "Registered: StockSage Bot (at startup)"
 
-    # --- 2. StockSage Populate Outcomes (02:00 daily) ---
+    # --- 2. StockSage Log Composite Signals (01:30 daily, observation-mode only) ---
+    $compositeSignalsAction = New-ScheduledTaskAction -Execute (Join-Path $repoRoot "scripts\run_log_composite_signals.cmd") -WorkingDirectory $repoRoot
+    $compositeSignalsTrigger = New-ScheduledTaskTrigger -Daily -At "01:30"
+    Register-ScheduledTask -TaskName "StockSage Log Composite Signals" -Action $compositeSignalsAction -Trigger $compositeSignalsTrigger `
+        -Settings $settings -User $user -Password $password -RunLevel Limited -Force | Out-Null
+    Write-Host "Registered: StockSage Log Composite Signals (daily 01:30)"
+
+    # --- 3. StockSage Populate Outcomes (02:00 daily) ---
     $outcomesAction = New-ScheduledTaskAction -Execute (Join-Path $repoRoot "scripts\run_populate_outcomes.cmd") -WorkingDirectory $repoRoot
     $outcomesTrigger = New-ScheduledTaskTrigger -Daily -At "02:00"
     Register-ScheduledTask -TaskName "StockSage Populate Outcomes" -Action $outcomesAction -Trigger $outcomesTrigger `
         -Settings $settings -User $user -Password $password -RunLevel Limited -Force | Out-Null
     Write-Host "Registered: StockSage Populate Outcomes (daily 02:00)"
 
-    # --- 3. StockSage Watchlist Evaluation (02:30 daily, scheduled-apply) ---
+    # --- 4. StockSage Populate Composite Outcomes (02:15 daily, observation-mode only) ---
+    $compositeOutcomesAction = New-ScheduledTaskAction -Execute (Join-Path $repoRoot "scripts\run_populate_composite_signal_outcomes.cmd") -WorkingDirectory $repoRoot
+    $compositeOutcomesTrigger = New-ScheduledTaskTrigger -Daily -At "02:15"
+    Register-ScheduledTask -TaskName "StockSage Populate Composite Outcomes" -Action $compositeOutcomesAction -Trigger $compositeOutcomesTrigger `
+        -Settings $settings -User $user -Password $password -RunLevel Limited -Force | Out-Null
+    Write-Host "Registered: StockSage Populate Composite Outcomes (daily 02:15)"
+
+    # --- 5. StockSage Watchlist Evaluation (02:30 daily, scheduled-apply) ---
     $evalAction = New-ScheduledTaskAction -Execute (Join-Path $repoRoot "scripts\run_watchlist_evaluation.cmd") -WorkingDirectory $repoRoot
     $evalTrigger = New-ScheduledTaskTrigger -Daily -At "02:30"
     Register-ScheduledTask -TaskName "StockSage Watchlist Evaluation" -Action $evalAction -Trigger $evalTrigger `
         -Settings $settings -User $user -Password $password -RunLevel Limited -Force | Out-Null
     Write-Host "Registered: StockSage Watchlist Evaluation (daily 02:30)"
 
-    # --- 4. StockSage Auto Sync (every 15 minutes, indefinitely) ---
+    # --- 6. StockSage Auto Sync (every 15 minutes, indefinitely) ---
     $syncAction = New-ScheduledTaskAction -Execute (Join-Path $repoRoot "scripts\run_auto_sync.cmd") -WorkingDirectory $repoRoot
     # NOT [TimeSpan]::MaxValue -- Task Scheduler rejects its serialized form
     # (P99999999DT23H59M59S) as out of range. 10 years is effectively forever.
@@ -98,7 +122,7 @@ finally {
 # see is a failure.
 Write-Host ""
 Write-Host "Verifying registration against Get-ScheduledTask..."
-$expected = @("StockSage Bot", "StockSage Populate Outcomes", "StockSage Watchlist Evaluation", "StockSage Auto Sync")
+$expected = @("StockSage Bot", "StockSage Log Composite Signals", "StockSage Populate Outcomes", "StockSage Populate Composite Outcomes", "StockSage Watchlist Evaluation", "StockSage Auto Sync")
 $missing = @()
 foreach ($name in $expected) {
     $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
@@ -114,5 +138,5 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 Write-Host ""
-Write-Host "All four tasks registered and verified."
+Write-Host "All six tasks registered and verified."
 Write-Host "Reminder: if your Windows password ever changes, re-run this script -- the stored credential breaks silently otherwise."

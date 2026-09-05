@@ -37,6 +37,14 @@ python scripts/run_composite_scan.py [SYMBOL ...]
 # Scheduler; writes ONLY alert_outcomes, idempotent, partial fills OK)
 python scripts/populate_outcomes.py
 
+# Nightly composite-signal logging (silent, observation-mode only — see
+# "Parallel scoring engine" below; writes ONLY composite_signals, idempotent)
+python scripts/log_composite_signals.py
+
+# Nightly composite-signal-outcome population (writes ONLY
+# composite_signal_outcomes; same semantics as populate_outcomes.py)
+python scripts/populate_composite_signal_outcomes.py
+
 # Advisory stop/exit check for one open LONG position (live fetch, no DB,
 # no execution; prints recommended stop + exit signals)
 python scripts/run_position_check.py SYMBOL ENTRY_PRICE ENTRY_DATE [--stop S] [--score N] [--prev-stop P]
@@ -155,7 +163,20 @@ and BUY-flag score (70/75), plus score-keyed ATR stop sizing. Runs alongside
 deliberately has NO RSI veto (unlike `full_analysis()`) and computes on
 completed bars only, except session-normalized relative volume which
 measures the live bar. Indicator math reuses the exact `ta` calls and
-parameters from `analyzers/technical.py`.
+parameters from `analyzers/technical.py`. RS layer scoring and the regime's
+`required_rs` were revised 2026-09-05 (graduated ceiling with a margin
+above `required_rs`, plus a regime bump when SPY itself sits far above its
+own SMA150) — see `docs/composite_vs_legacy_tracking.md` for the diagnostic
+that motivated it. Since 2026-09-05, `scripts/log_composite_signals.py`
+(daily 01:30 IL, Task Scheduler) silently logs every ACTIVE-tier symbol
+that clears `flag_buy` into `composite_signals` — full layer breakdown,
+regime, stop sizing — with `scripts/populate_composite_signal_outcomes.py`
+(daily 02:15 IL) populating forward returns into
+`composite_signal_outcomes` once bars complete (same T+1/3/5/10 convention
+as `populate_outcomes.py`, reusing its `compute_outcome()` with
+`take_profit=inf` since composite has no TP level). Purely additive,
+observation-mode data collection — neither script is read by
+`check_alerts()` or sends any alert.
 
 `analyzers/position_management.py` — advisory trailing-stop/exit module for
 open LONG positions, on top of the composite engine's stop sizing (imports
@@ -198,7 +219,16 @@ bars, T+0 excluded, stop assumed first on both-barrier days, MAE measured
 through the exit bar — semantics documented in the script header),
 `user_preferences`, `symbol_categories`,
 `evaluation_runs`, `evaluation_run_changes`, `stock_prices`, `scanner_runs`,
-`scanner_results`.
+`scanner_results`. v10 adds `composite_signals` (1:1 per ACTIVE-tier symbol/
+day that clears the composite engine's `flag_buy`: full layer breakdown,
+regime, stop sizing; `UNIQUE(symbol, signal_date)`, written by
+`log_composite_signal()`/`scripts/log_composite_signals.py`) and
+`composite_signal_outcomes` (same T+1/3/5/10/MAE/r_multiple shape as
+`alert_outcomes`, minus take-profit — `first_barrier_hit` only ever
+`'stop_loss'`/`'none'` — populated by
+`scripts/populate_composite_signal_outcomes.py`). Purely additive
+observation-mode data; nothing in `check_alerts()` or the live alert path
+reads either table.
 `price_at_alert` in `alert_signals` is the live fetcher price passed
 explicitly — never `analysis["current_price"]` (see known inconsistencies).
 
