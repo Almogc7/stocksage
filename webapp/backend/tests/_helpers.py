@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -40,6 +41,27 @@ def make_temp_bot_db(directory: Path, rows: list[tuple] | None = None) -> Path:
     finally:
         conn.close()
     return path
+
+
+@contextmanager
+def bot_db_module(path: Path):
+    """Points db.database at `path` for the duration of the block, so tests
+    can seed alerts/composite_signals/backtest rows through the bot's own
+    real writer functions instead of hand-rolled SQL. Refuses anything that
+    isn't a throwaway temp file, so a bug here can never point the bot
+    module at the real db/stocksage.db."""
+    import db.database as dbmod
+
+    resolved = path.resolve()
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+    assert resolved.is_relative_to(tmp_root), f"{resolved} is not under {tmp_root}"
+    assert resolved != REAL_DB, "refusing to point db.database at the real bot DB"
+    original = dbmod.DB_PATH
+    dbmod.DB_PATH = resolved
+    try:
+        yield dbmod
+    finally:
+        dbmod.DB_PATH = original
 
 
 class TempEnvTestCase(unittest.TestCase):

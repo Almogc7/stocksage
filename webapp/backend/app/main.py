@@ -69,3 +69,18 @@ async def get_sparklines(
             raise HTTPException(status_code=422, detail=f"Invalid symbol: {s}")
     data = await run_in_threadpool(sparklines.get_sparklines, seen, range)
     return {"range": range, "data": data}
+
+
+@app.get("/api/signals/{symbol}")
+async def get_signals(
+    symbol: str,
+    from_: str | None = Query(None, alias="from"),
+    include_backtest: bool = Query(False),
+) -> dict:
+    if not prices.SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=422, detail="Invalid symbol")
+    if from_ is not None and not bot_db.FROM_DATE_RE.match(from_):
+        raise HTTPException(status_code=422, detail="Invalid from date")
+    return await run_in_threadpool(
+        bot_db.fetch_signals_for_symbol, symbol.upper(), from_, include_backtest
+    )

@@ -2,16 +2,21 @@ import { useEffect, useRef, useState } from 'react'
 import {
   CandlestickSeries,
   createChart,
+  createSeriesMarkers,
   HistogramSeries,
   LineSeries,
   type IChartApi,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
   type Time,
 } from 'lightweight-charts'
 import { usePrices } from '@/hooks/usePrices'
+import { useSignals } from '@/hooks/useSignals'
 import { sma } from '@/lib/sma'
 import { aggregateWeekly } from '@/lib/weekly'
 import { formatPercent, formatPrice } from '@/lib/format'
+import { buildMarkers, flattenSignals, SOURCE_COLORS, SOURCE_LABELS, type FlatSignal, type SourceKey } from '@/lib/signalMarkers'
+import { SignalDetailPanel } from './SignalDetailPanel'
 import type { Candle, PriceRange, PricesResponse } from '@/lib/api'
 
 type ChartMode = 'D' | 'W'
@@ -73,21 +78,43 @@ export function MaximizedChart({
   onClose: () => void
 }) {
   const { data, loading, error, fetchFiveYear } = usePrices(symbol)
+  const { data: signalsData, loadBacktest } = useSignals(symbol)
   const [activeData, setActiveData] = useState<PricesResponse | null>(null)
   const [selectedRange, setSelectedRange] = useState<PriceRange>('1y')
   const [rangeLoading, setRangeLoading] = useState(false)
   const [hover, setHover] = useState<OhlcReadout | null>(null)
   const [mode, setMode] = useState<ChartMode>('D')
+  const [enabledSources, setEnabledSources] = useState<Set<SourceKey>>(
+    () => new Set(['alert', 'composite']),
+  )
+  const [activePanel, setActivePanel] = useState<FlatSignal[] | null>(null)
+  const [droppedSignalCount, setDroppedSignalCount] = useState(0)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null)
+  const signalGroupsRef = useRef<Map<string, FlatSignal[]>>(new Map())
 
   useEffect(() => {
     setActiveData(null)
     setSelectedRange('1y')
     setHover(null)
     setMode('D')
+    setActivePanel(null)
   }, [symbol])
+
+  function toggleSource(key: SourceKey) {
+    setEnabledSources((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) {
+        next.delete(key)
+      } else {
+        next.add(key)
+        if (key === 'backtest') void loadBacktest()
+      }
+      return next
+    })
+  }
 
   useEffect(() => {
     if (data) setActiveData(data)
@@ -116,6 +143,15 @@ export function MaximizedChart({
     const candleSeries = chart.addSeries(CandlestickSeries, {}, 0)
     candleSeries.setData(seriesCandles)
     candleSeriesRef.current = candleSeries
+
+    const seriesMarkers = createSeriesMarkers(candleSeries, [])
+    markersRef.current = seriesMarkers
+
+    chart.subscribeClick((param) => {
+      const id = param.hoveredInfo?.objectId
+      const group = typeof id === 'string' ? signalGroupsRef.current.get(id) : undefined
+      setActivePanel(group ?? null)
+    })
 
     const closeByTime = new Map(seriesCandles.map((c) => [c.time, c]))
     const volumeSeries = chart.addSeries(
@@ -164,9 +200,21 @@ export function MaximizedChart({
       chart.remove()
       chartRef.current = null
       candleSeriesRef.current = null
+      markersRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeData, mode])
+
+  useEffect(() => {
+    if (!activeData || !markersRef.current) return
+    const { candles: seriesCandles } = seriesFor(activeData, mode)
+    const candleTimes = seriesCandles.map((c) => c.time)
+    const flat = flattenSignals(signalsData)
+    const { markers, groups, droppedCount } = buildMarkers(flat, mode, enabledSources, candleTimes)
+    signalGroupsRef.current = groups
+    markersRef.current.setMarkers(markers)
+    setDroppedSignalCount(droppedCount)
+  }, [activeData, mode, signalsData, enabledSources])
 
   async function selectRange(key: PriceRange, days: number) {
     setSelectedRange(key)
@@ -277,6 +325,26 @@ export function MaximizedChart({
           ))}
         </div>
 
+        <div className="flex gap-1">
+          {(['alert', 'composite', 'backtest'] as const).map((key) => (
+            <button
+              key={key}
+              onClick={() => toggleSource(key)}
+              className={
+                enabledSources.has(key)
+                  ? 'flex items-center gap-1 rounded-md bg-[var(--panel-hover)] px-2 py-1 text-xs font-medium text-[var(--text)]'
+                  : 'flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--text-dim)] opacity-50 hover:opacity-100'
+              }
+            >
+              <span
+                className="inline-block h-2 w-2 rounded-full"
+                style={{ backgroundColor: SOURCE_COLORS[key] }}
+              />
+              {SOURCE_LABELS[key]}
+            </button>
+          ))}
+        </div>
+
         {hover && (
           <div className="tabular flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-dim)]">
             <span>{hover.time}</span>
@@ -297,6 +365,19 @@ export function MaximizedChart({
             </span>
           </div>
         )}
+
+        {(enabledSources.has('composite') || enabledSources.has('backtest')) && (
+          <div className="text-xs text-[var(--text-dim)]">
+            Flags are historical and informational only — composite scores did not discriminate
+            winners in the 2-year backtest.
+          </div>
+        )}
+        {droppedSignalCount > 0 && (
+          <div className="text-xs text-[var(--text-dim)]">
+            {droppedSignalCount} signal{droppedSignalCount > 1 ? 's' : ''} before the loaded range
+            not shown
+          </div>
+        )}
       </div>
 
       <div className="relative flex-1">
@@ -311,6 +392,9 @@ export function MaximizedChart({
           </div>
         )}
         <div ref={containerRef} className="h-full w-full" />
+        {activePanel && (
+          <SignalDetailPanel signals={activePanel} onClose={() => setActivePanel(null)} />
+        )}
       </div>
     </div>
   )
