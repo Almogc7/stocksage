@@ -1,25 +1,24 @@
 import type { AlertSignal, CompositeSignalEntry, SignalOutcome } from '@/lib/api'
 import type { FlatSignal } from '@/lib/signalMarkers'
 import { formatPrice } from '@/lib/format'
+import { describeOutcome } from '@/lib/outcomeDisplay'
 
 function isAlert(signal: FlatSignal): signal is FlatSignal & { payload: AlertSignal } {
   return signal.source === 'alert'
 }
 
 function OutcomeBlock({ outcome }: { outcome: SignalOutcome }) {
-  if (outcome.pending) {
+  const rows = describeOutcome(outcome)
+  if (rows === null) {
     return <div className="text-[var(--text-dim)]">Outcome pending</div>
   }
   return (
     <div className="flex flex-wrap gap-x-3 gap-y-1">
-      <span>T+1 {outcome.close_t1 != null ? formatPrice(outcome.close_t1) : '—'}</span>
-      <span>T+3 {outcome.close_t3 != null ? formatPrice(outcome.close_t3) : '—'}</span>
-      <span>T+5 {outcome.close_t5 != null ? formatPrice(outcome.close_t5) : '—'}</span>
-      <span>T+10 {outcome.close_t10 != null ? formatPrice(outcome.close_t10) : '—'}</span>
-      <span>
-        Stop {outcome.first_barrier_hit === 'stop_loss' ? 'hit' : 'not hit'}
-      </span>
-      {outcome.r_multiple != null && <span>R {outcome.r_multiple.toFixed(2)}</span>}
+      {rows.map((r) => (
+        <span key={r.label}>
+          {r.label} {r.value}
+        </span>
+      ))}
     </div>
   )
 }
@@ -32,7 +31,7 @@ function SignalRow({ signal }: { signal: FlatSignal }) {
         <div className="flex items-center justify-between">
           <span className="font-medium text-[var(--text)]">{signal.date}</span>
           <span className="text-[var(--text-dim)]">
-            Flagged (legacy) — score {a.score ?? '—'}, verdict {a.verdict ?? '—'}
+            Flagged (legacy, {a.alert_type}) — score {a.score ?? '—'}, verdict {a.verdict ?? '—'}
           </span>
         </div>
         <div className="text-[var(--text-dim)]">

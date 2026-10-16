@@ -11,13 +11,33 @@ export interface FlatSignal {
   payload: AlertSignal | CompositeSignalEntry
 }
 
-const SOURCE_STYLE: Record<
-  SourceKey,
-  { shape: SeriesMarkerShape; position: SeriesMarkerBarPosition; color: string; size: number }
-> = {
+type MarkerStyle = { shape: SeriesMarkerShape; position: SeriesMarkerBarPosition; color: string; size: number }
+
+const SOURCE_STYLE: Record<SourceKey, MarkerStyle> = {
   alert: { shape: 'arrowUp', position: 'belowBar', color: '#3ddc97', size: 1 },
   composite: { shape: 'circle', position: 'aboveBar', color: '#8a7cff', size: 1 },
   backtest: { shape: 'square', position: 'aboveBar', color: '#5b6473', size: 0.75 },
+}
+
+/** Legacy alerts are a grab-bag of `alert_type`s (`BUY_SIGNAL`,
+ * `PRICE_UP`, `RSI_OVERBOUGHT`, ...); only `BUY_SIGNAL` is an actual buy
+ * call, so it keeps the green arrow. Everything else gets a visually
+ * distinct, deliberately unremarkable style so it never reads as a buy
+ * signal at a glance. */
+export type AlertStyleKey = 'buy' | 'other'
+
+export function alertStyleKey(alertType: string): AlertStyleKey {
+  return alertType === 'BUY_SIGNAL' ? 'buy' : 'other'
+}
+
+const ALERT_STYLE: Record<AlertStyleKey, MarkerStyle> = {
+  buy: SOURCE_STYLE.alert,
+  other: { shape: 'circle', position: 'belowBar', color: '#8a93a6', size: 0.85 },
+}
+
+function styleFor(source: SourceKey, styleKey: string): MarkerStyle {
+  if (source === 'alert') return ALERT_STYLE[styleKey as AlertStyleKey]
+  return SOURCE_STYLE[source]
 }
 
 /** Flattens a SignalsResponse into one date-sortable list, independent of
@@ -80,6 +100,7 @@ export function buildMarkers(
 ): BuildMarkersResult {
   const groups = new Map<string, FlatSignal[]>()
   const groupTimes = new Map<string, string>()
+  const groupStyleKeys = new Map<string, string>()
   let droppedCount = 0
 
   for (const signal of flat) {
@@ -90,19 +111,21 @@ export function buildMarkers(
       droppedCount += 1
       continue
     }
-    const groupKey = `${signal.source}:${snapped}`
+    const styleKey = signal.source === 'alert' ? alertStyleKey((signal.payload as AlertSignal).alert_type) : signal.source
+    const groupKey = `${signal.source}:${styleKey}:${snapped}`
     const group = groups.get(groupKey)
     if (group) {
       group.push(signal)
     } else {
       groups.set(groupKey, [signal])
       groupTimes.set(groupKey, snapped)
+      groupStyleKeys.set(groupKey, styleKey)
     }
   }
 
   const markers: SeriesMarkerBar<Time>[] = []
   for (const [groupKey, group] of groups) {
-    const style = SOURCE_STYLE[group[0].source]
+    const style = styleFor(group[0].source, groupStyleKeys.get(groupKey) as string)
     markers.push({
       time: groupTimes.get(groupKey) as Time,
       position: style.position,
