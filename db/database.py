@@ -412,6 +412,80 @@ def migrate_db() -> None:
             )
         """)
 
+        # v11 tables — offline historical backtest of the composite engine
+        # (scripts/backtest_composite.py), walking the full config.py
+        # WATCHLIST universe day by day over 2-3y of history with the SAME
+        # look-ahead discipline as the live engine (completed bars only).
+        # Fully observation-mode: nothing here is read by check_alerts(),
+        # log_composite_signals.py, or any live path. Append-only across
+        # runs (each run gets its own run_id; old runs are never
+        # overwritten or deleted) so historical backtests remain comparable
+        # as the scoring logic evolves.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS composite_backtest_runs (
+                run_id          TEXT PRIMARY KEY,
+                started_at      TIMESTAMP NOT NULL,
+                finished_at     TIMESTAMP,
+                period_years    REAL    NOT NULL,
+                universe_size   INTEGER NOT NULL,
+                symbols_ok      INTEGER,
+                symbols_failed  INTEGER,
+                total_signals   INTEGER,
+                notes           TEXT
+            )
+        """)
+
+        # One row per historical flag_buy=True fire, signal + outcome
+        # combined (unlike the live composite_signals/composite_signal_
+        # outcomes split) since a backtest already has the full forward
+        # price history in hand at scoring time — no separate nightly
+        # outcome job is needed. Layer breakdown mirrors composite_signals;
+        # outcome fields mirror composite_signal_outcomes (populate_outcomes.
+        # compute_outcome(), take_profit=inf, so first_barrier_hit is only
+        # ever 'stop_loss'/'none'). spy_close_at_signal/spy_close_tN let the
+        # analysis compute SPY-relative (excess) return per signal.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS composite_backtest_signals (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id                TEXT    NOT NULL REFERENCES composite_backtest_runs(run_id),
+                symbol                TEXT    NOT NULL,
+                signal_date           TEXT    NOT NULL,
+                regime                TEXT    NOT NULL,
+                total_score           REAL    NOT NULL,
+                required_score        INTEGER NOT NULL,
+                trend_pts             REAL    NOT NULL,
+                momentum_pts          REAL    NOT NULL,
+                volume_pts            REAL    NOT NULL,
+                rs_pts                REAL    NOT NULL,
+                rs_ratio              REAL,
+                required_rs           REAL    NOT NULL,
+                price                 REAL    NOT NULL,
+                atr                   REAL,
+                stop_price            REAL,
+                stop_multiplier       REAL,
+                close_t1              REAL,
+                close_t3              REAL,
+                close_t5              REAL,
+                close_t10             REAL,
+                max_adverse_excursion REAL,
+                first_barrier_hit     TEXT CHECK(
+                    first_barrier_hit IN ('stop_loss', 'none')
+                ),
+                r_multiple            REAL,
+                spy_close_at_signal   REAL,
+                spy_close_t1          REAL,
+                spy_close_t3          REAL,
+                spy_close_t5          REAL,
+                spy_close_t10         REAL,
+                computed_at           TIMESTAMP NOT NULL,
+                UNIQUE (run_id, symbol, signal_date)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_composite_backtest_signals_run
+                ON composite_backtest_signals(run_id)
+        """)
+
         # v2 table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS symbol_categories (
@@ -1269,6 +1343,93 @@ def upsert_composite_signal_outcome(signal_id: int, outcome: dict) -> None:
                 _utc_now_str(),
             ),
         )
+
+
+def start_backtest_run(run_id: str, period_years: float, universe_size: int) -> None:
+    """Insert the header row for one composite_backtest_signals run.
+    Append-only: each run_id is a fresh row, never reused (raises on a
+    genuine collision instead of silently overwriting a prior run)."""
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO composite_backtest_runs
+               (run_id, started_at, period_years, universe_size)
+               VALUES (?, ?, ?, ?)""",
+            (run_id, _utc_now_str(), period_years, universe_size),
+        )
+
+
+def finish_backtest_run(
+    run_id: str, symbols_ok: int, symbols_failed: int,
+    total_signals: int, notes: str | None = None,
+) -> None:
+    """Mark a backtest run complete with its final counts."""
+    with _connect() as conn:
+        conn.execute(
+            """UPDATE composite_backtest_runs
+               SET finished_at = ?, symbols_ok = ?, symbols_failed = ?,
+                   total_signals = ?, notes = ?
+               WHERE run_id = ?""",
+            (_utc_now_str(), symbols_ok, symbols_failed, total_signals, notes, run_id),
+        )
+
+
+def insert_backtest_signals(run_id: str, rows: list[dict]) -> int:
+    """Bulk-insert backtest signal+outcome rows for one symbol (or a batch).
+    INSERT OR IGNORE on the (run_id, symbol, signal_date) UNIQUE constraint
+    so a re-run of the same run_id (e.g. resuming after a crash) never
+    double-counts a signal already written. Returns the number of rows
+    actually inserted (rows already present are silently skipped)."""
+    if not rows:
+        return 0
+    now = _utc_now_str()
+    with _connect() as conn:
+        cur = conn.executemany(
+            """INSERT OR IGNORE INTO composite_backtest_signals
+               (run_id, symbol, signal_date, regime, total_score,
+                required_score, trend_pts, momentum_pts, volume_pts, rs_pts,
+                rs_ratio, required_rs, price, atr, stop_price, stop_multiplier,
+                close_t1, close_t3, close_t5, close_t10,
+                max_adverse_excursion, first_barrier_hit, r_multiple,
+                spy_close_at_signal, spy_close_t1, spy_close_t3,
+                spy_close_t5, spy_close_t10, computed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    run_id, r["symbol"], r["signal_date"], r["regime"],
+                    r["total_score"], r["required_score"], r["trend_pts"],
+                    r["momentum_pts"], r["volume_pts"], r["rs_pts"],
+                    r.get("rs_ratio"), r["required_rs"], r["price"],
+                    r.get("atr"), r.get("stop_price"), r.get("stop_multiplier"),
+                    r.get("close_t1"), r.get("close_t3"), r.get("close_t5"),
+                    r.get("close_t10"), r.get("max_adverse_excursion"),
+                    r.get("first_barrier_hit"), r.get("r_multiple"),
+                    r.get("spy_close_at_signal"), r.get("spy_close_t1"),
+                    r.get("spy_close_t3"), r.get("spy_close_t5"),
+                    r.get("spy_close_t10"), now,
+                )
+                for r in rows
+            ],
+        )
+        return cur.rowcount if cur.rowcount > 0 else 0
+
+
+def get_latest_backtest_run_id() -> str | None:
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT run_id FROM composite_backtest_runs
+               ORDER BY started_at DESC LIMIT 1"""
+        ).fetchone()
+    return row["run_id"] if row else None
+
+
+def get_backtest_signals(run_id: str) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM composite_backtest_signals WHERE run_id = ? ORDER BY signal_date",
+            (run_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 # Cooldown policy (decision D3): one alert per symbol per UTC calendar day.
