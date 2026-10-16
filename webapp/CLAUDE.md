@@ -32,3 +32,9 @@ Rules for the StockSage web app (branch `feature/webapp`). The root
 - `webapp/backend/`  FastAPI app (+ `requirements.txt`, unittest tests)
 - `webapp/frontend/` Vite + React + TypeScript
 - `webapp/data/`     local state, gitignored
+
+## Shell command style
+Use simple single commands only. No PowerShell script blocks ({ ... }),
+no ForEach-Object, no pipelines, no command chaining with `;`. Run one
+command per call so permission rules can match it. To read part of a file,
+use the Read tool, not a shell one-liner.
