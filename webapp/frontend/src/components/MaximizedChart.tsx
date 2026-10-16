@@ -10,8 +10,15 @@ import {
 } from 'lightweight-charts'
 import { usePrices } from '@/hooks/usePrices'
 import { sma } from '@/lib/sma'
+import { aggregateWeekly } from '@/lib/weekly'
 import { formatPercent, formatPrice } from '@/lib/format'
 import type { Candle, PriceRange, PricesResponse } from '@/lib/api'
+
+type ChartMode = 'D' | 'W'
+
+function seriesFor(data: PricesResponse, mode: ChartMode) {
+  return mode === 'W' ? aggregateWeekly(data.candles, data.volume) : { candles: data.candles, volume: data.volume }
+}
 
 const RANGES = [
   { key: '1mo', label: '1M', days: 30 },
@@ -70,6 +77,7 @@ export function MaximizedChart({
   const [selectedRange, setSelectedRange] = useState<PriceRange>('1y')
   const [rangeLoading, setRangeLoading] = useState(false)
   const [hover, setHover] = useState<OhlcReadout | null>(null)
+  const [mode, setMode] = useState<ChartMode>('D')
   const containerRef = useRef<HTMLDivElement | null>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -78,6 +86,7 @@ export function MaximizedChart({
     setActiveData(null)
     setSelectedRange('1y')
     setHover(null)
+    setMode('D')
   }, [symbol])
 
   useEffect(() => {
@@ -102,18 +111,20 @@ export function MaximizedChart({
     })
     chartRef.current = chart
 
+    const { candles: seriesCandles, volume: seriesVolume } = seriesFor(activeData, mode)
+
     const candleSeries = chart.addSeries(CandlestickSeries, {}, 0)
-    candleSeries.setData(activeData.candles)
+    candleSeries.setData(seriesCandles)
     candleSeriesRef.current = candleSeries
 
-    const closeByTime = new Map(activeData.candles.map((c) => [c.time, c]))
+    const closeByTime = new Map(seriesCandles.map((c) => [c.time, c]))
     const volumeSeries = chart.addSeries(
       HistogramSeries,
       { priceFormat: { type: 'volume' } },
       1,
     )
     volumeSeries.setData(
-      activeData.volume.map((v) => {
+      seriesVolume.map((v) => {
         const candle = closeByTime.get(v.time)
         const up = candle ? candle.close >= candle.open : true
         return { ...v, color: up ? '#3ddc97' : '#ff5c7a' }
@@ -121,15 +132,16 @@ export function MaximizedChart({
     )
     chart.panes()[1]?.setHeight(100)
 
-    const closesForSma = activeData.candles.map((c) => ({ time: c.time, close: c.close }))
+    const [shortPeriod, longPeriod] = mode === 'W' ? [30, 40] : [150, 200]
+    const closesForSma = seriesCandles.map((c) => ({ time: c.time, close: c.close }))
     const sma150Series = chart.addSeries(LineSeries, { color: SMA150_COLOR, lineWidth: 1 }, 0)
-    sma150Series.setData(sma(closesForSma, 150))
+    sma150Series.setData(sma(closesForSma, shortPeriod))
 
     const sma200Series = chart.addSeries(LineSeries, { color: SMA200_COLOR, lineWidth: 1 }, 0)
-    sma200Series.setData(sma(closesForSma, 200))
+    sma200Series.setData(sma(closesForSma, longPeriod))
 
-    const lastTime = activeData.candles.at(-1)!.time
-    const firstTime = activeData.candles[0].time
+    const lastTime = seriesCandles.at(-1)!.time
+    const firstTime = seriesCandles[0].time
     const rangeDef = RANGES.find((r) => r.key === selectedRange) ?? RANGES[3]
     const defaultFrom = daysBefore(lastTime, rangeDef.days)
     chart.timeScale().setVisibleRange({
@@ -137,11 +149,11 @@ export function MaximizedChart({
       to: lastTime,
     })
 
-    setHover(readoutFromCandle(activeData.candles.at(-1)!))
+    setHover(readoutFromCandle(seriesCandles.at(-1)!))
 
     chart.subscribeCrosshairMove((param) => {
       if (!param.time) {
-        setHover(readoutFromCandle(activeData.candles.at(-1)!))
+        setHover(readoutFromCandle(seriesCandles.at(-1)!))
         return
       }
       const candle = closeByTime.get(timeToKey(param.time))
@@ -154,7 +166,7 @@ export function MaximizedChart({
       candleSeriesRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeData])
+  }, [activeData, mode])
 
   async function selectRange(key: PriceRange, days: number) {
     setSelectedRange(key)
@@ -172,13 +184,32 @@ export function MaximizedChart({
     }
 
     if (!chart || !activeData || activeData.candles.length === 0) return
-    const lastTime = activeData.candles.at(-1)!.time
-    const firstTime = activeData.candles[0].time
+    const seriesCandles = seriesFor(activeData, mode).candles
+    const lastTime = seriesCandles.at(-1)!.time
+    const firstTime = seriesCandles[0].time
     const from = daysBefore(lastTime, days)
     chart.timeScale().setVisibleRange({
       from: from < firstTime ? firstTime : from,
       to: lastTime,
     })
+  }
+
+  async function selectMode(next: ChartMode) {
+    setMode(next)
+    if (next === 'W') {
+      if (!activeData || activeData.range !== '5y') {
+        setRangeLoading(true)
+        try {
+          const res = await fetchFiveYear()
+          if (res) setActiveData(res)
+        } finally {
+          setRangeLoading(false)
+        }
+      }
+      if (!(['1y', '2y', '5y'] as PriceRange[]).includes(selectedRange)) {
+        setSelectedRange('1y')
+      }
+    }
   }
 
   return (
@@ -197,11 +228,11 @@ export function MaximizedChart({
           <div className="flex items-center gap-3 text-xs text-[var(--text-dim)]">
             <span className="flex items-center gap-1">
               <span className="inline-block h-0.5 w-3" style={{ backgroundColor: SMA150_COLOR }} />
-              SMA150
+              {mode === 'W' ? 'SMA30w (~150d)' : 'SMA150'}
             </span>
             <span className="flex items-center gap-1">
               <span className="inline-block h-0.5 w-3" style={{ backgroundColor: SMA200_COLOR }} />
-              SMA200
+              {mode === 'W' ? 'SMA40w (~200d)' : 'SMA200'}
             </span>
           </div>
         </div>
@@ -215,7 +246,23 @@ export function MaximizedChart({
 
       <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] p-2">
         <div className="flex gap-1">
-          {RANGES.map((r) => (
+          {(['D', 'W'] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => selectMode(m)}
+              className={
+                mode === m
+                  ? 'rounded-md bg-[var(--accent)] px-2 py-1 text-xs font-medium text-[#0a0e14]'
+                  : 'rounded-md px-2 py-1 text-xs text-[var(--text-dim)] hover:bg-[var(--panel-hover)] hover:text-[var(--text)]'
+              }
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex gap-1">
+          {(mode === 'W' ? RANGES.filter((r) => r.key === '1y' || r.key === '2y' || r.key === '5y') : RANGES).map((r) => (
             <button
               key={r.key}
               onClick={() => selectRange(r.key, r.days)}
