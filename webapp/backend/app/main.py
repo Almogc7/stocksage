@@ -4,7 +4,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
-from . import bot_db, prices, settings, state_db
+from . import bot_db, prices, settings, sparklines, state_db
 
 
 @asynccontextmanager
@@ -45,3 +45,27 @@ async def get_prices(
         raise HTTPException(status_code=404, detail="No price data for symbol")
     except prices.UpstreamError:
         raise HTTPException(status_code=502, detail="Price provider unavailable")
+
+
+@app.get("/api/sparklines")
+async def get_sparklines(
+    symbols: str = Query(..., min_length=1),
+    range: Literal["1mo", "3mo", "6mo", "1y"] = Query("3mo"),
+) -> dict:
+    raw_symbols = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    seen: list[str] = []
+    for s in raw_symbols:
+        if s not in seen:
+            seen.append(s)
+    if not seen:
+        raise HTTPException(status_code=422, detail="No symbols provided")
+    if len(seen) > sparklines.SPARKLINE_MAX_SYMBOLS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Too many symbols (max {sparklines.SPARKLINE_MAX_SYMBOLS})",
+        )
+    for s in seen:
+        if not prices.SYMBOL_RE.match(s):
+            raise HTTPException(status_code=422, detail=f"Invalid symbol: {s}")
+    data = await run_in_threadpool(sparklines.get_sparklines, seen, range)
+    return {"range": range, "data": data}

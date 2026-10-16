@@ -12,6 +12,14 @@ CREATE TABLE IF NOT EXISTS price_cache (
     fetched_at REAL NOT NULL,
     payload    TEXT NOT NULL,
     PRIMARY KEY (symbol, range)
+);
+CREATE TABLE IF NOT EXISTS sparkline_cache (
+    symbol     TEXT NOT NULL,
+    range      TEXT NOT NULL,
+    fetched_at REAL NOT NULL,
+    negative   INTEGER NOT NULL DEFAULT 0,
+    payload    TEXT,
+    PRIMARY KEY (symbol, range)
 )
 """
 
@@ -20,7 +28,7 @@ def init_schema() -> None:
     path = settings.state_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
-        conn.execute(_SCHEMA)
+        conn.executescript(_SCHEMA)
 
 
 @contextmanager
