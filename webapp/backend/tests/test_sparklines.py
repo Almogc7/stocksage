@@ -11,7 +11,7 @@ from app.main import app
 
 
 def _single_df(closes):
-    idx = pd.to_datetime([f"2026-01-{i + 2:02d}" for i in range(len(closes))])
+    idx = pd.bdate_range(end="2026-01-02", periods=len(closes))
     return pd.DataFrame({"Close": closes}, index=idx)
 
 
@@ -50,7 +50,9 @@ class SparklinesApiTests(TempEnvTestCase):
         with mock.patch.object(sparklines, "_download", return_value=df2) as dl:
             body = self._get("/api/sparklines?symbols=AAPL,MSFT").json()
         self.assertEqual(dl.call_count, 1)
-        dl.assert_called_once_with(["MSFT"], "3mo")
+        # Always downloads 1y regardless of the requested range, so there's
+        # enough lead-in to classify the SMA150/SMA200 position server-side.
+        dl.assert_called_once_with(["MSFT"], "1y")
         self.assertIn("AAPL", body["data"])
         self.assertIn("MSFT", body["data"])
 
@@ -101,6 +103,65 @@ class SparklinesApiTests(TempEnvTestCase):
             self._get("/api/sparklines?symbols=AAPL")
         self.assertEqual(before, self.bot_db.read_bytes())
         self.assertTrue(self.state_db.exists())
+
+    def test_sma_position_above_when_trending_up_through_200_bars(self):
+        closes = [100 + i for i in range(200)]  # strictly rising, last close is the max
+        df = _single_df(closes)
+        with mock.patch.object(sparklines, "_download", return_value=df):
+            body = self._get("/api/sparklines?symbols=AAPL&range=1y").json()
+        self.assertEqual(body["data"]["AAPL"]["sma150_pos"], "above")
+        self.assertEqual(body["data"]["AAPL"]["sma200_pos"], "above")
+
+    def test_sma_position_below_when_trending_down_through_200_bars(self):
+        closes = [300 - i for i in range(200)]  # strictly falling, last close is the min
+        df = _single_df(closes)
+        with mock.patch.object(sparklines, "_download", return_value=df):
+            body = self._get("/api/sparklines?symbols=AAPL&range=1y").json()
+        self.assertEqual(body["data"]["AAPL"]["sma150_pos"], "below")
+        self.assertEqual(body["data"]["AAPL"]["sma200_pos"], "below")
+
+    def test_sma_position_null_with_insufficient_history(self):
+        df = _single_df([100 + i for i in range(80)])  # fewer than 150 bars
+        with mock.patch.object(sparklines, "_download", return_value=df):
+            body = self._get("/api/sparklines?symbols=AAPL&range=1y").json()
+        self.assertIsNone(body["data"]["AAPL"]["sma150_pos"])
+        self.assertIsNone(body["data"]["AAPL"]["sma200_pos"])
+
+    def test_sma200_null_with_150_to_199_bars(self):
+        df = _single_df([100 + i for i in range(170)])  # enough for 150, not 200
+        with mock.patch.object(sparklines, "_download", return_value=df):
+            body = self._get("/api/sparklines?symbols=AAPL&range=1y").json()
+        self.assertIsNotNone(body["data"]["AAPL"]["sma150_pos"])
+        self.assertIsNone(body["data"]["AAPL"]["sma200_pos"])
+
+    def test_closes_trimmed_to_requested_range_despite_1y_download(self):
+        df = _single_df([100 + i for i in range(200)])
+        with mock.patch.object(sparklines, "_download", return_value=df):
+            body = self._get("/api/sparklines?symbols=AAPL&range=1mo").json()
+        self.assertEqual(body["range"], "1mo")
+        # ~30 calendar days of business-day bars, well under the full 200.
+        self.assertLess(len(body["data"]["AAPL"]["closes"]), 40)
+        self.assertIsNotNone(body["data"]["AAPL"]["sma150_pos"])
+
+    def test_cached_row_without_sma_fields_normalizes_to_none(self):
+        sparklines.state_db.init_schema()
+        now = sparklines.time.time()
+        legacy_payload = {
+            "symbol": "AAPL",
+            "range": "3mo",
+            "closes": [{"time": "2026-01-02", "close": 10.0}],
+        }
+        with sparklines.state_db.connect() as conn:
+            conn.execute(
+                "INSERT INTO sparkline_cache (symbol, range, fetched_at, negative, payload)"
+                " VALUES (?, ?, ?, 0, ?)",
+                ("AAPL", "3mo", now, sparklines.json.dumps(legacy_payload)),
+            )
+        with mock.patch.object(sparklines, "_download") as dl:
+            body = self._get("/api/sparklines?symbols=AAPL").json()
+        dl.assert_not_called()
+        self.assertIsNone(body["data"]["AAPL"]["sma150_pos"])
+        self.assertIsNone(body["data"]["AAPL"]["sma200_pos"])
 
 
 if __name__ == "__main__":

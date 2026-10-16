@@ -12,10 +12,14 @@ export interface WatchlistItem {
   pinned: boolean
 }
 
+export type SmaPosition = 'above' | 'below' | null
+
 export interface SparklineSeries {
   symbol: string
   range: string
   closes: { time: string; close: number }[]
+  sma150_pos: SmaPosition
+  sma200_pos: SmaPosition
 }
 
 export interface SparklinesResponse {

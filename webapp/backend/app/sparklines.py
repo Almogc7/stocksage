@@ -1,5 +1,10 @@
 """Close-only series for many symbols in one batched call, for grid
-sparklines. Cached in the webapp state DB; never touches the bot DB."""
+sparklines. Cached in the webapp state DB; never touches the bot DB.
+
+Every batched download fetches a full 1y of history (regardless of the
+requested range) so there is enough lead-in to classify each symbol's last
+close against its SMA150/SMA200 server-side; the returned `closes` series is
+then trimmed back down to the requested range."""
 import json
 import math
 import time
@@ -12,6 +17,8 @@ ALLOWED_RANGES = ("1mo", "3mo", "6mo", "1y")
 SPARKLINE_MAX_SYMBOLS = 60
 CACHE_TTL_SECONDS = 900
 NEGATIVE_CACHE_TTL_SECONDS = 300
+DOWNLOAD_RANGE = "1y"
+RANGE_DAYS = {"1mo": 30, "3mo": 90, "6mo": 182, "1y": 365}
 
 
 def _download(symbols: list[str], range_: str) -> pd.DataFrame:
@@ -27,8 +34,16 @@ def _download(symbols: list[str], range_: str) -> pd.DataFrame:
     )
 
 
+def _sma_position(closes: list[float], period: int) -> str | None:
+    if len(closes) < period:
+        return None
+    window = closes[-period:]
+    avg = sum(window) / period
+    return "above" if closes[-1] >= avg else "below"
+
+
 def _closes_payload(symbol: str, range_: str, df: pd.DataFrame) -> dict | None:
-    closes: list[dict] = []
+    all_closes: list[dict] = []
     seen: set[str] = set()
     for ts, row in df.sort_index().iterrows():
         close = row.get("Close")
@@ -38,10 +53,27 @@ def _closes_payload(symbol: str, range_: str, df: pd.DataFrame) -> dict | None:
         if day in seen:
             continue
         seen.add(day)
-        closes.append({"time": day, "close": round(float(close), 4)})
-    if not closes:
+        all_closes.append({"time": day, "close": round(float(close), 4)})
+    if not all_closes:
         return None
-    return {"symbol": symbol, "range": range_, "closes": closes}
+
+    sma150_pos = _sma_position([c["close"] for c in all_closes], 150)
+    sma200_pos = _sma_position([c["close"] for c in all_closes], 200)
+
+    days = RANGE_DAYS.get(range_)
+    if days is None:
+        closes = all_closes
+    else:
+        cutoff = pd.Timestamp(all_closes[-1]["time"]) - pd.Timedelta(days=days)
+        closes = [c for c in all_closes if pd.Timestamp(c["time"]) >= cutoff]
+
+    return {
+        "symbol": symbol,
+        "range": range_,
+        "closes": closes,
+        "sma150_pos": sma150_pos,
+        "sma200_pos": sma200_pos,
+    }
 
 
 def _load_cached(symbols: list[str], range_: str, now: float) -> dict[str, dict | None]:
@@ -58,8 +90,16 @@ def _load_cached(symbols: list[str], range_: str, now: float) -> dict[str, dict 
         age = now - r["fetched_at"]
         ttl = NEGATIVE_CACHE_TTL_SECONDS if r["negative"] else CACHE_TTL_SECONDS
         if age < ttl:
-            cached[r["symbol"]] = json.loads(r["payload"]) if r["payload"] else None
+            cached[r["symbol"]] = _normalize(json.loads(r["payload"])) if r["payload"] else None
     return cached
+
+
+def _normalize(payload: dict) -> dict:
+    """Back-fills sma150_pos/sma200_pos for cache rows written before they
+    existed, so old entries don't break the response shape."""
+    payload.setdefault("sma150_pos", None)
+    payload.setdefault("sma200_pos", None)
+    return payload
 
 
 def _store(symbol: str, range_: str, now: float, payload: dict | None) -> None:
@@ -81,7 +121,7 @@ def get_sparklines(symbols: list[str], range_: str) -> dict[str, dict | None]:
         return result
 
     try:
-        raw = _download(missing, range_)
+        raw = _download(missing, DOWNLOAD_RANGE)
     except Exception:
         for s in missing:
             with state_db.connect() as conn:
@@ -89,7 +129,7 @@ def get_sparklines(symbols: list[str], range_: str) -> dict[str, dict | None]:
                     "SELECT payload FROM sparkline_cache WHERE symbol = ? AND range = ?",
                     (s, range_),
                 ).fetchone()
-            result[s] = json.loads(row["payload"]) if row and row["payload"] else None
+            result[s] = _normalize(json.loads(row["payload"])) if row and row["payload"] else None
         return result
 
     multi = isinstance(raw.columns, pd.MultiIndex)

@@ -2,16 +2,30 @@ import { useEffect } from 'react'
 import { useInView } from '@/hooks/useInView'
 import { useSparklineRegistry } from '@/hooks/useSparklines'
 import { formatPercent, formatPrice, rangeLabel } from '@/lib/format'
-import type { WatchlistItem } from '@/lib/api'
+import { sparklineCloses, sparklinePct } from '@/lib/sparklinePct'
+import type { SmaPosition, WatchlistItem } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Sparkline } from './Sparkline'
 
-const STATE_LABEL: Record<string, string> = {
-  ACTIVE: 'Active',
-  MONITOR: 'Monitor',
-  ETF_INDEX_CONTEXT: 'ETF/Index',
-  TEMPORARILY_INELIGIBLE: 'Ineligible',
-  USER_REMOVED: 'Removed',
+function SmaChip({ label, pos }: { label: string; pos: SmaPosition }) {
+  return (
+    <span
+      className={cn(
+        'rounded border px-1 py-0.5 text-[10px] leading-none',
+        pos === 'above' && 'border-[var(--up)]/40 text-[var(--up)]',
+        pos === 'below' && 'border-[var(--down)]/40 text-[var(--down)]',
+        pos == null && 'border-[var(--border)] text-[var(--text-dim)]',
+      )}
+      title={
+        pos == null
+          ? `Not enough history for SMA${label}`
+          : `Last close is ${pos} its SMA${label}`
+      }
+    >
+      {pos === 'above' ? '▲' : pos === 'below' ? '▼' : '–'}
+      {label}
+    </span>
+  )
 }
 
 export function StockCard({
@@ -30,10 +44,11 @@ export function StockCard({
 
   const state = results[item.symbol]
 
-  const closes = state && state !== 'loading' ? state.closes.map((c) => c.close) : []
+  const closes = sparklineCloses(state)
   const lastPrice = closes.at(-1)
-  const pct =
-    closes.length >= 2 ? ((closes.at(-1)! - closes[0]) / closes[0]) * 100 : null
+  const pct = sparklinePct(state)
+  const sma150 = state && state !== 'loading' ? state.sma150_pos : null
+  const sma200 = state && state !== 'loading' ? state.sma200_pos : null
 
   return (
     <button
@@ -53,16 +68,17 @@ export function StockCard({
           </div>
           <div className="text-xs text-[var(--text-dim)]">{item.category}</div>
         </div>
-        <span className="shrink-0 rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--text-dim)]">
-          {STATE_LABEL[item.wl_state] ?? item.wl_state}
-        </span>
+        <div className="flex shrink-0 gap-1">
+          <SmaChip label="150" pos={sma150} />
+          <SmaChip label="200" pos={sma200} />
+        </div>
       </div>
 
-      <div className="flex h-9 items-center justify-center">
+      <div className="flex h-9 w-full items-center">
         {state === 'loading' || state === undefined ? (
           <div className="h-5 w-full animate-pulse rounded bg-[var(--panel-hover)]" />
         ) : closes.length >= 2 ? (
-          <Sparkline closes={closes} width={140} height={36} />
+          <Sparkline closes={closes} height={36} />
         ) : (
           <span className="text-xs text-[var(--text-dim)]">No data</span>
         )}

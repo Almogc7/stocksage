@@ -1,20 +1,22 @@
 interface Props {
   closes: number[]
-  width?: number
   height?: number
 }
 
+const VIEWBOX_WIDTH = 300
+
 /** Plain inline SVG polyline — intentionally not a lightweight-charts
- * instance; a grid can have dozens of these at once. */
-export function Sparkline({ closes, width = 120, height = 36 }: Props) {
+ * instance; a grid can have dozens of these at once. Scales to the width of
+ * its container via viewBox + width="100%" rather than a fixed pixel size. */
+export function Sparkline({ closes, height = 36 }: Props) {
   if (closes.length < 2) {
-    return <svg width={width} height={height} />
+    return <svg width="100%" height={height} />
   }
 
   const min = Math.min(...closes)
   const max = Math.max(...closes)
   const span = max - min || 1
-  const stepX = width / (closes.length - 1)
+  const stepX = VIEWBOX_WIDTH / (closes.length - 1)
   const up = closes[closes.length - 1] >= closes[0]
 
   const points = closes
@@ -26,7 +28,12 @@ export function Sparkline({ closes, width = 120, height = 36 }: Props) {
     .join(' ')
 
   return (
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+    <svg
+      width="100%"
+      height={height}
+      viewBox={`0 0 ${VIEWBOX_WIDTH} ${height}`}
+      preserveAspectRatio="none"
+    >
       <polyline
         points={points}
         fill="none"
