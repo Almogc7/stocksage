@@ -15,7 +15,8 @@ import { useSignals } from '@/hooks/useSignals'
 import { sma } from '@/lib/sma'
 import { aggregateWeekly } from '@/lib/weekly'
 import { formatPercent, formatPrice } from '@/lib/format'
-import { buildMarkers, flattenSignals, SOURCE_COLORS, SOURCE_LABELS, type FlatSignal, type SourceKey } from '@/lib/signalMarkers'
+import { buildMarkers, flattenSignals, SOURCE_LABELS, type FlatSignal, type SourceKey } from '@/lib/signalMarkers'
+import { describeSourceIndicator } from '@/lib/sourceIndicator'
 import { SignalDetailPanel } from './SignalDetailPanel'
 import type { Candle, PriceRange, PricesResponse } from '@/lib/api'
 
@@ -78,7 +79,7 @@ export function MaximizedChart({
   onClose: () => void
 }) {
   const { data, loading, error, fetchFiveYear } = usePrices(symbol)
-  const { data: signalsData, loadBacktest } = useSignals(symbol)
+  const { data: signalsData, loadBacktest, backtestLoading, backtestError, backtestLoaded } = useSignals(symbol)
   const [activeData, setActiveData] = useState<PricesResponse | null>(null)
   const [selectedRange, setSelectedRange] = useState<PriceRange>('1y')
   const [rangeLoading, setRangeLoading] = useState(false)
@@ -323,24 +324,51 @@ export function MaximizedChart({
           ))}
         </div>
 
-        <div className="flex gap-1">
-          {(['alert', 'composite', 'backtest'] as const).map((key) => (
-            <button
-              key={key}
-              onClick={() => toggleSource(key)}
-              className={
-                enabledSources.has(key)
-                  ? 'flex items-center gap-1 rounded-md bg-[var(--panel-hover)] px-2 py-1 text-xs font-medium text-[var(--text)]'
-                  : 'flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--text-dim)] opacity-50 hover:opacity-100'
-              }
-            >
-              <span
-                className="inline-block h-2 w-2 rounded-full"
-                style={{ backgroundColor: SOURCE_COLORS[key] }}
-              />
-              {SOURCE_LABELS[key]}
-            </button>
-          ))}
+        <div className="flex flex-wrap gap-1">
+          {(['alert', 'composite', 'backtest'] as const).map((key) => {
+            const count =
+              key === 'alert'
+                ? signalsData
+                  ? signalsData.alerts.length
+                  : null
+                : key === 'composite'
+                  ? signalsData
+                    ? signalsData.composite_signals.length
+                    : null
+                  : backtestLoaded && signalsData
+                    ? signalsData.backtest_signals.length
+                    : null
+            const indicator = describeSourceIndicator({
+              enabled: enabledSources.has(key),
+              count,
+              loading: key === 'backtest' ? backtestLoading : false,
+              error: key === 'backtest' ? backtestError : null,
+            })
+            return (
+              <button
+                key={key}
+                onClick={() => toggleSource(key)}
+                aria-pressed={enabledSources.has(key)}
+                title={indicator.tooltip ?? undefined}
+                className={
+                  enabledSources.has(key)
+                    ? 'flex items-center gap-1 rounded-md bg-[var(--panel-hover)] px-2 py-1 text-xs font-medium text-[var(--text)]'
+                    : 'flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--text-dim)] opacity-50 hover:opacity-100'
+                }
+              >
+                <span
+                  className={`inline-block h-2 w-2 rounded-full${indicator.pulsing ? ' animate-pulse' : ''}`}
+                  style={
+                    indicator.filled
+                      ? { backgroundColor: `var(${indicator.colorVar})` }
+                      : { backgroundColor: 'transparent', border: `1px solid var(${indicator.colorVar})` }
+                  }
+                />
+                {SOURCE_LABELS[key]}
+                {indicator.countLabel ? ` ${indicator.countLabel}` : ''}
+              </button>
+            )
+          })}
         </div>
 
         {hover && (

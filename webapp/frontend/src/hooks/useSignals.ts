@@ -12,9 +12,15 @@ export function useSignals(symbol: string | null) {
   const [error, setError] = useState<string | null>(null)
   const backtestCache = useRef<Map<string, SignalsResponse>>(new Map())
   const backtestInFlight = useRef<Map<string, Promise<SignalsResponse>>>(new Map())
+  const [backtestLoading, setBacktestLoading] = useState(false)
+  const [backtestError, setBacktestError] = useState<string | null>(null)
+  const [backtestLoaded, setBacktestLoaded] = useState(false)
 
   useEffect(() => {
     backtestCache.current.clear()
+    setBacktestLoading(false)
+    setBacktestError(null)
+    setBacktestLoaded(false)
     if (!symbol) {
       setData(null)
       return
@@ -42,15 +48,26 @@ export function useSignals(symbol: string | null) {
     const cached = backtestCache.current.get(symbol)
     if (cached) {
       setData(cached)
+      setBacktestLoaded(true)
       return cached
     }
-    const res = await dedupeAsync(symbol, backtestInFlight.current, () =>
-      fetchSignals(symbol, { includeBacktest: true }),
-    )
-    backtestCache.current.set(symbol, res)
-    setData(res)
-    return res
+    setBacktestLoading(true)
+    setBacktestError(null)
+    try {
+      const res = await dedupeAsync(symbol, backtestInFlight.current, () =>
+        fetchSignals(symbol, { includeBacktest: true }),
+      )
+      backtestCache.current.set(symbol, res)
+      setData(res)
+      setBacktestLoaded(true)
+      return res
+    } catch (err) {
+      setBacktestError((err as Error).message)
+      return null
+    } finally {
+      setBacktestLoading(false)
+    }
   }, [symbol])
 
-  return { data, loading, error, loadBacktest }
+  return { data, loading, error, loadBacktest, backtestLoading, backtestError, backtestLoaded }
 }
