@@ -39,12 +39,12 @@ describe('describeOutcome', () => {
       { label: 'T+3', value: '201.69' },
       { label: 'T+5', value: 'pending' },
       { label: 'T+10', value: 'pending' },
-      { label: 'Stop', value: 'hit' },
+      { label: 'Stop', value: 'touched intraday' },
       { label: 'R', value: '-1.00' },
     ])
   })
 
-  it('renders a fully-resolved outcome with every field populated', () => {
+  it('renders a fully-resolved outcome with every field populated, neither barrier touched', () => {
     const rows = describeOutcome(
       outcome({
         pending: false,
@@ -61,8 +61,24 @@ describe('describeOutcome', () => {
       { label: 'T+3', value: '202.64' },
       { label: 'T+5', value: '205.54' },
       { label: 'T+10', value: '209.21' },
-      { label: 'Stop', value: 'not hit' },
+      { label: 'Barrier', value: 'Neither stop nor target touched in the window' },
       { label: 'R', value: '0.31' },
     ])
+  })
+
+  it('labels a take-profit exit as "Target touched first", not a stop label', () => {
+    const rows = describeOutcome(
+      outcome({
+        pending: false,
+        close_t1: 160.0,
+        close_t3: 165.0,
+        close_t5: 170.0,
+        close_t10: 172.0,
+        first_barrier_hit: 'take_profit',
+        r_multiple: 2.0,
+      }),
+    )
+    expect(rows).toContainEqual({ label: 'Target', value: 'touched first' })
+    expect(rows).not.toContainEqual(expect.objectContaining({ label: 'Stop' }))
   })
 })

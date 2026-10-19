@@ -104,16 +104,14 @@ export function MaximizedChart({
   }, [symbol])
 
   function toggleSource(key: SourceKey) {
+    const turningOn = !enabledSources.has(key)
     setEnabledSources((prev) => {
       const next = new Set(prev)
-      if (next.has(key)) {
-        next.delete(key)
-      } else {
-        next.add(key)
-        if (key === 'backtest') void loadBacktest()
-      }
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
+    if (turningOn && key === 'backtest') void loadBacktest()
   }
 
   useEffect(() => {

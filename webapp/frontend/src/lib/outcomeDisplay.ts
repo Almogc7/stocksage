@@ -30,7 +30,20 @@ export function describeOutcome(outcome: SignalOutcome): OutcomeRow[] | null {
   ]
 
   if (outcome.first_barrier_hit != null) {
-    rows.push({ label: 'Stop', value: outcome.first_barrier_hit === 'stop_loss' ? 'hit' : 'not hit' })
+    // first_barrier_hit is decided from the daily LOW/HIGH vs. the
+    // stop/target, scanned bar by bar (see scripts/populate_outcomes.py
+    // compute_outcome()) — not from the closes shown above, so a bar can
+    // touch a barrier intraday and still close on the other side of it. If
+    // one bar touches both barriers, the code treats the stop as hit first:
+    // "If one bar touches both barriers (low <= stop AND high >= TP), the
+    // STOP is assumed hit first (conservative backtesting convention)."
+    if (outcome.first_barrier_hit === 'stop_loss') {
+      rows.push({ label: 'Stop', value: 'touched intraday' })
+    } else if (outcome.first_barrier_hit === 'take_profit') {
+      rows.push({ label: 'Target', value: 'touched first' })
+    } else {
+      rows.push({ label: 'Barrier', value: 'Neither stop nor target touched in the window' })
+    }
   }
 
   if (outcome.r_multiple != null) {

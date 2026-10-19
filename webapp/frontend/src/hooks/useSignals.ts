@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchSignals, type SignalsResponse } from '@/lib/api'
+import { dedupeAsync } from '@/lib/dedupeAsync'
 
 /** Fetches legacy-alert + composite-signal history for a symbol up front
  * (includeBacktest: false). Backtest rows are heavier and informational
@@ -10,6 +11,7 @@ export function useSignals(symbol: string | null) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const backtestCache = useRef<Map<string, SignalsResponse>>(new Map())
+  const backtestInFlight = useRef<Map<string, Promise<SignalsResponse>>>(new Map())
 
   useEffect(() => {
     backtestCache.current.clear()
@@ -42,7 +44,9 @@ export function useSignals(symbol: string | null) {
       setData(cached)
       return cached
     }
-    const res = await fetchSignals(symbol, { includeBacktest: true })
+    const res = await dedupeAsync(symbol, backtestInFlight.current, () =>
+      fetchSignals(symbol, { includeBacktest: true }),
+    )
     backtestCache.current.set(symbol, res)
     setData(res)
     return res
