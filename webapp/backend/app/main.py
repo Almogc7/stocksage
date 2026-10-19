@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
 from . import bot_db, prices, settings, sparklines, state_db
+from .patterns.detect import detect_patterns
 
 
 @asynccontextmanager
@@ -69,6 +70,25 @@ async def get_sparklines(
             raise HTTPException(status_code=422, detail=f"Invalid symbol: {s}")
     data = await run_in_threadpool(sparklines.get_sparklines, seen, range)
     return {"range": range, "data": data}
+
+
+@app.get("/api/patterns/{symbol}")
+async def get_patterns(
+    symbol: str,
+    range: Literal["1mo", "3mo", "6mo", "1y", "2y", "5y"] = Query("2y"),
+) -> dict:
+    """Informational only — never written to any bot table, never an
+    alert (webapp/CLAUDE.md rule 9)."""
+    if not prices.SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=422, detail="Invalid symbol")
+    try:
+        payload = await run_in_threadpool(prices.get_prices, symbol.upper(), range)
+    except prices.NoData:
+        raise HTTPException(status_code=404, detail="No price data for symbol")
+    except prices.UpstreamError:
+        raise HTTPException(status_code=502, detail="Price provider unavailable")
+    detections = await run_in_threadpool(detect_patterns, payload, symbol.upper())
+    return {"symbol": symbol.upper(), "range": range, "detections": detections}
 
 
 @app.get("/api/signals/{symbol}")
