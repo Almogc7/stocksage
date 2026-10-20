@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0a0e14;
+  --panel: #10151d;
+  --panel-hover: #141a24;
+  --border: #1f2733;
+  --text: #e6ebf2;
+  --text-dim: #8b96a5;
+  --accent: #4f9cff;
+  --up: #3ddc97;
+  --down: #ff5c7a;
+}
+
+* {
+  border-color: var(--border);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-family: 'SF Mono', 'Cascadia Code', ui-monospace, Menlo, monospace;
+}

@@ -8,3 +8,16 @@ db/*backup*.db
 logs/
 
 .claude/settings.local.json
+
+# --- webapp (feature/webapp) ---
+# Runtime/build artifacts must never show up as untracked: the server's
+# auto-sync skips every cycle when `git status --porcelain` is non-empty.
+webapp/**/node_modules/
+webapp/**/dist/
+webapp/**/.venv/
+webapp/data/
+webapp/**/*.db
+webapp/**/*.db-wal
+webapp/**/*.db-shm
+webapp/**/.env*
+!webapp/**/.env.example
