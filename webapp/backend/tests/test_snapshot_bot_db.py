@@ -142,6 +142,45 @@ class SnapshotBotDbTests(unittest.TestCase):
         self.assertEqual(list(dest.parent.glob(".*.tmp-*")), [])
         self.assertIn("ERROR: os.replace failed", log_path.read_text())
 
+    def test_missing_source_db_is_logged_not_raised(self):
+        dest = self.tmp / "dest.db"
+        log_path = self.tmp / "snapshot.log"
+        missing_source = self.tmp / "does-not-exist.db"
+
+        rc = snapshot_bot_db.run_snapshot(missing_source, dest, log_path)
+
+        self.assertEqual(rc, 1)
+        self.assertFalse(dest.exists())
+        self.assertIn("ERROR: backup failed", log_path.read_text())
+        self.assertEqual(list(dest.parent.glob(".*.tmp-*")), [])
+
+    def test_stale_tmp_file_older_than_an_hour_is_removed_at_start(self):
+        dest = self.tmp / "dest.db"
+        log_path = self.tmp / "snapshot.log"
+        stale = self.tmp / f".{dest.name}.tmp-99999"
+        stale.write_text("leftover from a crashed run")
+        old_time = time.time() - snapshot_bot_db.STALE_TMP_MAX_AGE_SECONDS - 60
+        import os as _os
+        _os.utime(stale, (old_time, old_time))
+
+        rc = snapshot_bot_db.run_snapshot(self.source, dest, log_path)
+
+        self.assertEqual(rc, 0)
+        self.assertFalse(stale.exists())
+        self.assertIn("removed stale tmp file", log_path.read_text())
+
+    def test_recent_tmp_file_under_an_hour_old_is_kept(self):
+        dest = self.tmp / "dest.db"
+        log_path = self.tmp / "snapshot.log"
+        recent = self.tmp / f".{dest.name}.tmp-88888"
+        recent.write_text("another run in flight")
+
+        rc = snapshot_bot_db.run_snapshot(self.source, dest, log_path)
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(recent.exists())
+        recent.unlink()
+
     def test_replace_retries_then_succeeds(self):
         dest = self.tmp / "dest.db"
         log_path = self.tmp / "snapshot.log"

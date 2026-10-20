@@ -214,6 +214,37 @@ class ProdAppPathTraversalTests(_ProdAppTestCase):
         with TestClient(app) as client:
             self._assert_falls_back_to_index(client, "//server/share")
 
+    def _assert_falls_back_with_filesystem_patched(self, path: str):
+        # The allowlist is built once, eagerly, at app-creation time (real
+        # filesystem calls there are fine and already happened before this
+        # patch is applied). The per-request handler itself must never call
+        # Path.resolve()/Path.is_file() on request-derived input -- prove it
+        # by making both raise and confirming the fallback is untouched.
+        app = self.prod_app()
+        with TestClient(app) as client:
+            with mock.patch.object(Path, "resolve", side_effect=AssertionError("resolve() called on request input")), \
+                 mock.patch.object(Path, "is_file", side_effect=AssertionError("is_file() called on request input")):
+                self._assert_falls_back_to_index(client, path)
+
+    def test_plain_dotdot_traversal_with_filesystem_patched(self):
+        self._assert_falls_back_with_filesystem_patched("/../../../../etc/passwd")
+
+    def test_drive_letter_absolute_path_with_filesystem_patched(self):
+        self._assert_falls_back_with_filesystem_patched("/C:/Windows/win.ini")
+
+    def test_encoded_backslash_traversal_with_filesystem_patched(self):
+        self._assert_falls_back_with_filesystem_patched("/..%5c..%5csecret.txt")
+
+    def test_unc_looking_path_with_filesystem_patched(self):
+        self._assert_falls_back_with_filesystem_patched("//server/share")
+
+    def test_embedded_null_byte_with_filesystem_patched(self):
+        self._assert_falls_back_with_filesystem_patched("/index.html%00.txt")
+
+    def test_reserved_device_names_with_filesystem_patched(self):
+        self._assert_falls_back_with_filesystem_patched("/con")
+        self._assert_falls_back_with_filesystem_patched("/nul")
+
 
 class ProdAppStartupFailureTests(TempEnvTestCase):
     def setUp(self):

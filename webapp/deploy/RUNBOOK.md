@@ -89,7 +89,7 @@ Then `scp` the resulting `dist\` folder to the server:
 scp -r webapp\frontend\dist\* youraccount@server:C:\stocksage-deploy\dist\
 ```
 Keep the previous `dist\` around somewhere (e.g. rename it before
-overwriting) so step 12 (rollback) has something to restore.
+overwriting) so step 13 (rollback) has something to restore.
 
 ## 6. Run the snapshot job once manually, before starting the webapp
 
@@ -112,7 +112,20 @@ webapp\deploy\install_webapp_task.ps1
 Each prompts once for the Windows account password and verifies its own
 registration against `Get-ScheduledTask`.
 
-## 8. Expose it over the tailnet
+## 8. Start the tasks manually
+
+The webapp task's trigger is **at startup only** -- registering it does
+not start it, and it will not run again until the next reboot. Start
+both tasks by hand now, snapshot first so the webapp's own startup
+check (step 6) has a valid snapshot to find:
+```
+schtasks /Run /TN "StockSage Webapp Snapshot"
+schtasks /Run /TN "StockSage Webapp"
+```
+Check `C:\stocksage-deploy\logs\webapp_supervisor.log` for a `run.py
+starting` line with no immediate restart before continuing.
+
+## 9. Expose it over the tailnet
 
 Check your installed Tailscale version's flags first:
 ```
@@ -132,7 +145,7 @@ tailscale status
 `funnel` would expose this to the public internet, which is explicitly
 not wanted here -- only `serve` (tailnet-only) should ever show up.
 
-## 9. Verify from a phone on the tailnet
+## 10. Verify from a phone on the tailnet
 
 - Load the tailnet URL -- the dashboard renders.
 - Load a nonsense client-side path -- the SPA shell still renders
@@ -150,7 +163,7 @@ curl http://<server-lan-ip>:8000/api/health
 from another device on the LAN (not over the tailnet) -- this should
 time out or refuse the connection.
 
-## 10. Restart confidence check
+## 11. Restart confidence check
 
 ```
 schtasks /End /TN "StockSage Webapp"
@@ -161,14 +174,35 @@ Then reload the page -- confirms the task survives a clean restart, not
 just a fresh manual start. Optionally do this once as an actual
 off-hours server reboot instead, for full at-startup-trigger confidence.
 
-## 11. Rollback
+## 12. Failure-mode check: crash-loop restart interval
+
+Confirm the supervisor paces restarts instead of spinning hot when the
+app can't start at all:
+```
+ren C:\stocksage-deploy\dist dist-moved-for-test
+schtasks /End /TN "StockSage Webapp"
+schtasks /Run /TN "StockSage Webapp"
+```
+Watch `C:\stocksage-deploy\logs\webapp_supervisor.log` for a few cycles
+-- the `run.py starting` timestamps should land roughly **10 seconds
+apart**, not a flood of restarts with no gap (that would mean `timeout`
+exited immediately under Task Scheduler's no-console session instead of
+actually sleeping -- see the comment in
+`webapp\deploy\run_webapp_supervisor.cmd`). Then restore:
+```
+ren C:\stocksage-deploy\dist-moved-for-test dist
+schtasks /End /TN "StockSage Webapp"
+schtasks /Run /TN "StockSage Webapp"
+```
+
+## 13. Rollback
 
 - Stop the task: `schtasks /End /TN "StockSage Webapp"`.
 - Restore the previous `dist\` (the one you kept in step 5), or revert
   the `main` merge and wait for/trigger `auto_sync`.
 - Restart: `schtasks /Run /TN "StockSage Webapp"`.
 
-## 12. Confirm the bot's auto_sync is still healthy
+## 14. Confirm the bot's auto_sync is still healthy
 
 After all of the above, check `logs\auto_sync.log` (bot-side) keeps
 printing `up to date (<hash>)` on its normal 15-minute cadence -- i.e.
@@ -176,7 +210,7 @@ nothing about the new webapp files made `git status` dirty, which would
 make `auto_sync.ps1` skip every cycle per its own documented safety
 rule.
 
-## 13. Runtime-path / gitignore checklist
+## 15. Runtime-path / gitignore checklist
 
 All already covered by the existing root `.gitignore` -- nothing new to
 add:

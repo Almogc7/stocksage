@@ -32,7 +32,10 @@ call :rotate_log_if_large
 echo ===== [%date% %time%] run.py starting ===== >> "%LOG_FILE%"
 "%PYTHON_EXE%" run.py >> "%LOG_FILE%" 2>&1
 echo ===== [%date% %time%] run.py exited with code %errorlevel% -- restarting in 10s ===== >> "%LOG_FILE%"
-timeout /t 10 /nobreak >nul
+REM timeout can exit immediately when run with no console attached (as
+REM under Task Scheduler), turning a failing start into a hot loop; ping
+REM always blocks for the full duration regardless of console presence.
+ping -n 11 127.0.0.1 >nul
 goto loop
 
 :rotate_log_if_large

@@ -29,6 +29,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+STALE_TMP_MAX_AGE_SECONDS = 3600
+
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - dotenv ships with the backend venv
@@ -97,18 +99,38 @@ def _replace_with_retry(tmp_path: Path, dest: Path) -> None:
     raise last_error
 
 
+def _clean_stale_tmp_files(dest: Path, log_path: Path) -> None:
+    """A tmp file left behind by a prior run that crashed or was killed
+    before cleanup (e.g. os.replace never reached) would otherwise sit
+    forever -- remove ones old enough that no in-flight run could still
+    own them."""
+    now = time.time()
+    pattern = f".{dest.name}.tmp-*"
+    for stale in dest.parent.glob(pattern):
+        try:
+            age = now - stale.stat().st_mtime
+            if age > STALE_TMP_MAX_AGE_SECONDS:
+                stale.unlink(missing_ok=True)
+                _log(log_path, f"removed stale tmp file -- {stale} (age {age:.0f}s)")
+        except OSError as exc:
+            _log(log_path, f"WARNING: failed to clean stale tmp file {stale} -- {exc}")
+
+
 def run_snapshot(source: Path, dest: Path, log_path: Path) -> int:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    _clean_stale_tmp_files(dest, log_path)
     tmp_path = dest.parent / f".{dest.name}.tmp-{os.getpid()}"
 
-    source_uri = source.resolve().as_uri() + "?mode=ro"
-    source_conn = sqlite3.connect(source_uri, uri=True, timeout=10.0)
+    source_conn: sqlite3.Connection | None = None
     tmp_conn: sqlite3.Connection | None = None
     try:
+        source_uri = source.resolve().as_uri() + "?mode=ro"
+        source_conn = sqlite3.connect(source_uri, uri=True, timeout=10.0)
         tmp_conn = sqlite3.connect(str(tmp_path))
         source_conn.backup(tmp_conn)
     except Exception as exc:
-        source_conn.close()
+        if source_conn is not None:
+            source_conn.close()
         if tmp_conn is not None:
             tmp_conn.close()
         tmp_path.unlink(missing_ok=True)

@@ -156,25 +156,35 @@ class _ImmutableStaticFiles(StaticFiles):
         return response
 
 
+def _build_file_allowlist(dist_dir: Path) -> frozenset[str]:
+    """POSIX-style relative paths of every real file under dist_dir,
+    excluding assets/ (served separately by the StaticFiles mount).
+    Computed once, from the filesystem, never from request input."""
+    allowlist: set[str] = set()
+    for path in dist_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(dist_dir)
+        if rel.parts and rel.parts[0] == "assets":
+            continue
+        allowlist.add(rel.as_posix())
+    return frozenset(allowlist)
+
+
 def _register_spa_fallback(app: FastAPI) -> None:
     dist_dir = settings.frontend_dist_path().resolve()
     app.mount("/assets", _ImmutableStaticFiles(directory=dist_dir / "assets"), name="assets")
+    allowlist = _build_file_allowlist(dist_dir)
 
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str):
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
 
-        is_safe_file = False
-        candidate: Path | None = None
-        try:
-            candidate = (dist_dir / full_path).resolve()
-            is_safe_file = bool(full_path) and candidate.is_file() and candidate.is_relative_to(dist_dir)
-        except (ValueError, OSError):
-            is_safe_file = False
-
-        if is_safe_file:
-            return FileResponse(candidate)
+        # Membership in a precomputed allowlist -- never resolve(),
+        # is_file(), or is_relative_to() on a request-derived path.
+        if full_path in allowlist:
+            return FileResponse(dist_dir / full_path)
         # The SPA shell itself must always revalidate so a new deploy is
         # picked up on next load (unlike the hashed assets above).
         return FileResponse(dist_dir / "index.html", headers={"Cache-Control": "no-cache"})
