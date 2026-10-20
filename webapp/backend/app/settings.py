@@ -32,6 +32,25 @@ def state_db_path() -> Path:
     return WEBAPP_DIR / "data" / "webapp_state.db"
 
 
+def webapp_port() -> int:
+    """Port uvicorn binds to. Host stays hard-coded to 127.0.0.1 in run.py
+    and must never be configurable here."""
+    raw = os.environ.get("WEBAPP_PORT", "").strip()
+    if not raw:
+        return 8000
+    try:
+        port = int(raw)
+    except ValueError:
+        raise RuntimeError(
+            f"WEBAPP_PORT must be an integer between 1024 and 65535, got {raw!r}."
+        )
+    if not 1024 <= port <= 65535:
+        raise RuntimeError(
+            f"WEBAPP_PORT must be an integer between 1024 and 65535, got {port}."
+        )
+    return port
+
+
 def is_production() -> bool:
     return os.environ.get("WEBAPP_PRODUCTION", "").strip().lower() in ("1", "true", "yes")
 
