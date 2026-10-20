@@ -29,7 +29,7 @@ function SignalRow({ signal }: { signal: FlatSignal }) {
     return (
       <div className="space-y-1 border-b border-[var(--border)] py-2 text-xs last:border-0">
         <div className="flex items-center justify-between">
-          <span className="font-medium text-[var(--text)]">{signal.date}</span>
+          <span className="shrink-0 whitespace-nowrap font-medium text-[var(--text)]">{signal.date}</span>
           <span className="text-[var(--text-dim)]">
             Flagged (legacy, {a.alert_type}) — score {a.score ?? '—'}, verdict {a.verdict ?? '—'}
           </span>
@@ -52,7 +52,7 @@ function SignalRow({ signal }: { signal: FlatSignal }) {
   return (
     <div className="space-y-1 border-b border-[var(--border)] py-2 text-xs last:border-0">
       <div className="flex items-center justify-between">
-        <span className="font-medium text-[var(--text)]">{signal.date}</span>
+        <span className="shrink-0 whitespace-nowrap font-medium text-[var(--text)]">{signal.date}</span>
         <span className="text-[var(--text-dim)]">
           {label} — score {c.total_score.toFixed(1)}/{c.required_score}, regime {c.regime}
         </span>

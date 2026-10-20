@@ -31,9 +31,10 @@ export function describeSourceIndicator(opts: {
   if (loading) {
     return { filled: opts.enabled, colorVar: '--text-dim', pulsing: true, tooltip: null, countLabel: null }
   }
+  const isEmpty = opts.enabled && opts.count === 0
   return {
     filled: opts.enabled,
-    colorVar: opts.enabled ? '--up' : '--down',
+    colorVar: isEmpty ? '--text-dim' : opts.enabled ? '--up' : '--down',
     pulsing: false,
     tooltip: null,
     countLabel: opts.count != null ? `(${opts.count})` : null,

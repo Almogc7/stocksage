@@ -12,6 +12,16 @@ describe('describeSourceIndicator', () => {
     })
   })
 
+  it('shows a dimmed (not bright green) dot when enabled but the count is zero', () => {
+    expect(describeSourceIndicator({ enabled: true, count: 0 })).toEqual({
+      filled: true,
+      colorVar: '--text-dim',
+      pulsing: false,
+      tooltip: null,
+      countLabel: '(0)',
+    })
+  })
+
   it('shows a hollow red dot, still with its count label, when disabled and settled', () => {
     // The count reflects what's already loaded regardless of on/off state,
     // so a disabled source's count stays visible (e.g. to decide whether

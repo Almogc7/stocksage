@@ -30,3 +30,23 @@ def state_db_path() -> Path:
     if raw:
         return Path(raw).expanduser().resolve()
     return WEBAPP_DIR / "data" / "webapp_state.db"
+
+
+def is_production() -> bool:
+    return os.environ.get("WEBAPP_PRODUCTION", "").strip().lower() in ("1", "true", "yes")
+
+
+def frontend_dist_path() -> Path:
+    """Where the built frontend (npm run build's dist/) lives in
+    production. Defaults outside the repo so a forgotten env var can't
+    silently serve a stale dev build from inside the repo tree."""
+    raw = os.environ.get("WEBAPP_FRONTEND_DIST_PATH", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path(r"C:\stocksage-deploy\dist")
+
+
+def repo_db_dir() -> Path:
+    """The bot's own db/ directory (the live DB's location) — used only
+    to REJECT a production STOCKSAGE_DB_PATH that points inside it."""
+    return (WEBAPP_DIR.parent / "db").resolve()
