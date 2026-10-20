@@ -29,10 +29,12 @@ or touch anything inside the repo checkout on this server (the new
 `webapp/deploy/.env`, the venv, etc.) -- otherwise you risk racing
 `auto_sync`'s own dirty-tree check against your in-progress setup.
 
-## 1. Check port 8000 is free
+## 1. Check the port is free
 
+Use whichever port you'll configure as `WEBAPP_PORT` in step 4 (default
+8000 if you leave it unset; this runbook uses 8765 from step 4 onward):
 ```
-netstat -ano | findstr :8000
+netstat -ano | findstr :8765
 ```
 Should print nothing. If something is already listening, find out what
 before continuing.
@@ -64,9 +66,12 @@ Copy `webapp\backend\.env.example` to `webapp\backend\.env` and set:
 ```
 WEBAPP_PRODUCTION=true
 STOCKSAGE_DB_PATH=C:\stocksage-deploy\snapshot\bot.db
+WEBAPP_PORT=8765
 ```
 (the **snapshot** destination from step 6/7 below, never the live bot
-DB -- the app refuses to start otherwise).
+DB -- the app refuses to start otherwise). `WEBAPP_PORT` must be an
+integer 1024-65535; the host stays hard-coded to `127.0.0.1` and is
+never configurable.
 
 Copy `webapp\deploy\.env.example` to `webapp\deploy\.env` and set:
 ```
@@ -127,23 +132,42 @@ starting` line with no immediate restart before continuing.
 
 ## 9. Expose it over the tailnet
 
-Check your installed Tailscale version's flags first:
+This runbook targets Tailscale 1.102.2. Check what's already configured
+**before** adding anything:
 ```
-tailscale serve --help
+tailscale serve status
 ```
-Then serve the loopback-bound app:
+If another Serve rule already uses the default HTTPS port (443), don't
+touch it and never run `tailscale serve reset` -- that would tear down
+every existing rule, not just one you're adding. Instead, serve this app
+on a separate port:
 ```
-tailscale serve https / http://127.0.0.1:8000
+tailscale serve --bg --https=8443 8765
 ```
-(adjust to whatever your version's `tailscale serve --help` output
-actually shows -- flags have changed across versions). Confirm it's
-`serve`, not `funnel`, that's configured:
+(8765 is the `WEBAPP_PORT` configured in step 4; 127.0.0.1 is implied --
+loopback is all this app ever binds to). The app is then reachable at:
+```
+https://<server>.<tailnet>.ts.net:8443
+```
+Confirm it's `serve`, not `funnel`, that's configured:
 ```
 tailscale serve status
 tailscale status
 ```
 `funnel` would expose this to the public internet, which is explicitly
 not wanted here -- only `serve` (tailnet-only) should ever show up.
+
+### Tailnet access rule
+
+Add an ACL rule allowing only the devices that should reach the webapp
+to reach `tcp:8443` on the server -- nothing broader. For example, a
+phone that should view the dashboard gets `tcp:8443` to the server and
+no other port; it should not also inherit access to the bot's other
+ports or services. Be aware that if an existing ACL rule already lists
+specific ports for the server, any port missing from that list is
+blocked implicitly -- the symptom is a plain browser timeout on
+`https://<server>.<tailnet>.ts.net:8443`, not a clear connection-refused
+error, so check the ACL first if step 10 below doesn't load.
 
 ## 10. Verify from a phone on the tailnet
 
@@ -158,7 +182,7 @@ Also confirm the app is **not** reachable from the server's LAN IP
 (it binds to `127.0.0.1` only, even with `tailscale serve` in front of
 it):
 ```
-curl http://<server-lan-ip>:8000/api/health
+curl http://<server-lan-ip>:8765/api/health
 ```
 from another device on the LAN (not over the tailnet) -- this should
 time out or refuse the connection.

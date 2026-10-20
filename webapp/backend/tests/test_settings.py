@@ -53,6 +53,38 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(p.name, "db")
         self.assertEqual(p.parent, settings.WEBAPP_DIR.parent)
 
+    def test_webapp_port_default(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(settings.webapp_port(), 8000)
+
+    def test_webapp_port_valid_override(self):
+        with mock.patch.dict(os.environ, {"WEBAPP_PORT": "8765"}):
+            self.assertEqual(settings.webapp_port(), 8765)
+
+    def test_webapp_port_non_numeric_fails_loudly(self):
+        with mock.patch.dict(os.environ, {"WEBAPP_PORT": "notaport"}):
+            with self.assertRaises(RuntimeError):
+                settings.webapp_port()
+
+    def test_webapp_port_empty_uses_default(self):
+        with mock.patch.dict(os.environ, {"WEBAPP_PORT": "  "}):
+            self.assertEqual(settings.webapp_port(), 8000)
+
+    def test_webapp_port_zero_fails_loudly(self):
+        with mock.patch.dict(os.environ, {"WEBAPP_PORT": "0"}):
+            with self.assertRaises(RuntimeError):
+                settings.webapp_port()
+
+    def test_webapp_port_too_low_fails_loudly(self):
+        with mock.patch.dict(os.environ, {"WEBAPP_PORT": "80"}):
+            with self.assertRaises(RuntimeError):
+                settings.webapp_port()
+
+    def test_webapp_port_too_high_fails_loudly(self):
+        with mock.patch.dict(os.environ, {"WEBAPP_PORT": "70000"}):
+            with self.assertRaises(RuntimeError):
+                settings.webapp_port()
+
 
 if __name__ == "__main__":
     unittest.main()
