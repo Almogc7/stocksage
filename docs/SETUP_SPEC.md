@@ -33,10 +33,16 @@ until the evaluation plan (§13) says otherwise.
   the outcome (this is not `analyzers/position_management.py`'s job, nor
   does this spec extend that module).
 - No changes to the existing Stack A alert pipeline (`agent/core.py`) or the
-  composite engine (`analyzers/composite.py`). This system reuses pure
-  helper functions from `analyzers/technical.py` and config constants from
-  `config.py`, but never calls into or mutates Stack A's or the composite
-  engine's own state (in-memory dedup, DB cooldown tables, scheduler loop).
+  composite engine (`analyzers/composite.py`) **for the new setup system's
+  own feature work**: this system reuses pure helper functions from
+  `analyzers/technical.py` and config constants from `config.py`, but never
+  calls into or mutates Stack A's or the composite engine's own state
+  (in-memory dedup, DB cooldown tables, scheduler loop). **This non-goal
+  governs new feature work, not bug fixes.** It does not forbid fixing an
+  existing defect in Stack A — PR 0a (§14) is exactly such a fix, justified
+  by a gap `docs/CURRENT_ALERT_LOGIC.md` §1 already documents (the alert
+  loop has no per-symbol error handling of its own), not by anything this
+  new setup system needs for itself.
 
 ---
 
@@ -1178,26 +1184,42 @@ successfully, found nothing" apart from "didn't run."
 
 ## 14. Rollout
 
-1. **PR 0** — two separate, independent concerns, kept explicitly apart:
-   - **(a) Characterization tests on existing Stack A code, unchanged**: pin
-     dependencies in `requirements.txt` to the actual production-installed
-     versions (closing the gap flagged in `docs/CURRENT_ALERT_LOGIC.md`
-     §7/§8); add tests locking down *current* behavior before anything new
-     touches shared helper functions — verdict-cutoff boundaries at score
-     55/75, the stop/TP ATR formula (1.5x/3.0x), and morning-scan filtering
-     end-to-end (all three currently untested per `docs/CURRENT_ALERT_LOGIC.md`
-     §10). This does **not** modify `agent/core.py` or any other Stack A
-     file — it only adds tests around existing behavior, consistent with the
-     non-goal (§1) of never changing Stack A.
-   - **(b) Isolation requirement — a constraint and test on the NEW code
-     only, not a change to `check_alerts()`**: the new system's own modules
-     (trigger job, outcome module, logging) must never import from or call
-     into `agent/core.py`'s internals (`_alerted_this_session`,
-     `was_alerted_today()`, the `schedule`/`asyncio.run()` loop). This is
-     enforced by a structural test on the new code (e.g. asserting the new
-     modules have no import path into `agent.core`'s private state) — **not**
-     by adding a guard inside `check_alerts()` itself, which would be a
-     modification to Stack A and contradict §1's non-goal.
+1. **PR 0 — split into three independent PRs**, each separately mergeable:
+   - **PR 0a — characterization tests on Stack A, PLUS one deliberate behavior
+     change: a per-symbol try/except inside `check_alerts()`.** Add tests
+     locking down *current* Stack A behavior before anything new touches
+     shared helper functions — verdict-cutoff boundaries at score 55/75, the
+     stop/TP ATR formula (1.5x/3.0x), and morning-scan filtering end-to-end
+     (all three currently untested per `docs/CURRENT_ALERT_LOGIC.md` §10).
+     **Then fix one existing defect, in the same PR**: wrap the per-symbol
+     body of `check_alerts()`'s loop (`agent/core.py:253` onward) in its own
+     `try/except`, so that one symbol raising an exception logs
+     `[ALERT SKIP] <symbol>: <error>` via the `stocksage.*` logger (not
+     `print()`) and the rest of the cycle continues for every other symbol —
+     mirroring the per-symbol try/except `run_morning_scan()` already has
+     (`agent/core.py:206-218`, `docs/CURRENT_ALERT_LOGIC.md` §5). **This is a
+     bug fix, not new feature work**: `docs/CURRENT_ALERT_LOGIC.md` §1
+     already documents that the alert loop currently has **no** per-symbol
+     error handling of its own (an uncaught exception for one symbol would
+     propagate out and abort the whole cycle, unlike the morning scan) — §1's
+     non-goal governs feature work the new setup system does for itself, not
+     fixes to a pre-existing gap in Stack A that this audit already
+     identified. A regression test proves the new try/except: one symbol's
+     `full_analysis()` (or fetch) raising still lets every other symbol in
+     the same cycle alert normally.
+   - **PR 0b — pin `requirements.txt` to the production-installed versions.**
+     No code change: closes the gap flagged in `docs/CURRENT_ALERT_LOGIC.md`
+     §7/§8, where `ta`, `pandas`, `numpy`, `yfinance`, `python-telegram-bot`
+     currently have zero version pins.
+   - **PR 0c — the isolation test for the NEW code, independent of 0a/0b.**
+     The new system's own modules (trigger job, outcome module, logging)
+     must never import from or call into `agent/core.py`'s internals
+     (`_alerted_this_session`, `was_alerted_today()`, the
+     `schedule`/`asyncio.run()` loop) or share its dedup/cooldown state.
+     Enforced by a structural test on the new code (e.g. asserting the new
+     modules have no import path into `agent.core`'s private state) —
+     this constrains only the *new* modules; it says nothing about, and does
+     not conflict with, PR 0a's fix inside `check_alerts()` itself.
 2. Data validation + trend/eligibility filter (§3-4).
 3. Setup definition + trigger/stop/target math (§5-8).
 4. Logging tables — candidates (with reason codes) + outcomes (§12).
@@ -1259,8 +1281,10 @@ the outcome logic lives in a new, separate module (not editing
 sole primary pre-registered hypothesis, V2/V3/V4 are sensitivity analyses
 only (§13); the trigger is a **touch**, not a confirmed break — `HIGH ≥ SH`,
 no added buffer (§5 item 6); the baseline is a **mechanics-matched control**,
-not same-date peers (§13); PR 0's isolation requirement is enforced as a
-test on the new code, never as a modification to `check_alerts()` (§14).
+not same-date peers (§13); PR 0c's isolation requirement is enforced as a
+test on the new code, constraining only the new modules — it is independent
+of, and does not exclude, PR 0a's own deliberate, justified fix inside
+`check_alerts()` (the per-symbol try/except, §1/§14).
 
 **Confirmed facts (no longer open), with citations:**
 - `get_watchlist()` is defined at `db/database.py:611-623`; `get_active_watchlist()`
@@ -1290,5 +1314,5 @@ test on the new code, never as a modification to `check_alerts()` (§14).
   does not match `CLAUDE.md`'s claimed production version `1.5.1` — this is
   consistent with `docs/CURRENT_ALERT_LOGIC.md`'s existing finding that
   dependency versions are unpinned in `requirements.txt` and therefore
-  unverifiable from the repository alone; PR 0 (§14) is where this gets
+  unverifiable from the repository alone; PR 0b (§14) is where this gets
   resolved for the production server specifically.
