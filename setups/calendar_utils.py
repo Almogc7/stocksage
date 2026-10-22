@@ -25,3 +25,18 @@ def most_recent_us_trading_day(reference_date: date) -> date:
     while not is_us_market_day(d):
         d -= timedelta(days=1)
     return d
+
+
+def advance_us_trading_days(start_date: date, n: int) -> date:
+    """The date reached by advancing `n` US market trading days forward
+    from start_date (start_date itself is NOT counted as one of the n
+    steps). The forward-direction counterpart to
+    most_recent_us_trading_day() -- needed for a setup's validity_end
+    (docs/SETUP_SPEC.md §6: "5 trading sessions from the scan date")."""
+    d = start_date
+    counted = 0
+    while counted < n:
+        d += timedelta(days=1)
+        if is_us_market_day(d):
+            counted += 1
+    return d
