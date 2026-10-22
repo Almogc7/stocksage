@@ -225,6 +225,17 @@ with `data/fetcher.py:is_market_open()` (`:142-148`) and
   This spec adds an **explicit last-bar `volume > 0` check**, new, not
   reused from anywhere in the repo.
 
+**Still open for the next step (swing-point detection and ATR, §5/§7):**
+this section's "no NaN"/"volume > 0" checks above are scoped to the last
+bar and the liquidity-window close/volume only (the foundation step
+implemented first); the next step must additionally validate **no NaN in
+`open`/`high`/`low` over the full lookback window `calc_swing_levels()`/
+`find_confirmed_swing_highs()`/`calc_atr()` actually read** (up to
+`lookback=50`/120 bars back, not just the last bar or the liquidity
+window) — a NaN anywhere in that wider window can silently corrupt a
+confirmed swing point or an ATR value without tripping any check this
+foundation step runs.
+
 Reference `analyzers/eligibility.py:compute_data_quality()` (`:42-68`) as a
 second, independent precedent for weighting these same three checks —
 useful as a pattern shape, but not reused directly, since it returns a 0-1
@@ -1382,25 +1393,20 @@ caution, applied here to deployment timing instead of DB writes.
 
 ## 15. Open decisions for the owner
 
-1. **Live scan universe** (§2): the precise `wl_state IN ('ACTIVE','MONITOR')`
-   + category/`security_type` exclusion definition is now the **recommended
-   default**, not merely an open question — but it is still pending the
-   owner's explicit confirmation before implementation, since it's a broader
-   scan scope than today's ACTIVE-tier-only Stack A.
-2. **Stop cap** (§7): `min(12% of entry, 5×ATR)` is proposed with a worked
-   rationale, but explicitly left open, not settled.
-3. **Validity window**: is 5 trading sessions still right given the fill
-   model and chase-by-R:R logic (§6), or should it match the hold horizon
-   differently?
-4. The **100 setups / 30 symbols / 3 calendar years** replay-sufficiency
-   thresholds, the **month-cluster bootstrap** metric procedure, and the
-   mechanics-matched baseline's **majority-of-years pass rule** (§13) are
-   proposed defaults, not rigorously derived — the owner may prefer
-   different numbers or a different statistical procedure; either way, they
-   must be frozen in the pre-registration file (§13) before any run.
-5. **Costs assumption** (§12): 10 bps slippage each way, zero commission, is
-   a reasoned placeholder — the owner's actual broker fee schedule should
-   replace it before any live run.
+1. **SETTLED 2026-10-22 — Live scan universe** (§2): `wl_state IN
+   ('ACTIVE','MONITOR')` + category/`security_type` exclusions, exactly as
+   specified, confirmed by the owner.
+2. **SETTLED 2026-10-22 — Stop cap** (§7): `min(12% of entry, 5×ATR)`,
+   confirmed as proposed.
+3. **SETTLED 2026-10-22 — Validity window**: 5 trading sessions, confirmed
+   as-is (§6).
+4. **SETTLED 2026-10-22 — Evaluation thresholds** (§13): **100 setups / 30
+   distinct symbols / 3 calendar years**, the month-cluster bootstrap metric
+   procedure, and the mechanics-matched baseline's majority-of-years pass
+   rule, confirmed as proposed. (Still to be copied verbatim into the
+   pre-registration file itself before any replay run, per §13/§14.)
+5. **SETTLED 2026-10-22 — Costs assumption** (§12): 10 bps slippage each
+   way, zero commission, confirmed as proposed.
 6. Earnings informational line (§9): the data source's *existence*
    (`yfinance.Ticker.calendar`/`.earnings_dates`) is now a confirmed fact,
    not an open question (see below) — but its field reliability/format in a
@@ -1476,7 +1482,13 @@ no added buffer (§5 item 6); the baseline is a **mechanics-matched control**,
 not same-date peers (§13); PR 0c's isolation requirement is enforced as a
 test on the new code, constraining only the new modules — it is independent
 of, and does not exclude, PR 0a's own deliberate, justified fix inside
-`check_alerts()` (the per-symbol try/except, §1/§14).
+`check_alerts()` (the per-symbol try/except, §1/§14). **Settled by the owner
+on 2026-10-22** (items 1-5 above): the live scan universe definition (§2);
+the `min(12% of entry, 5×ATR)` stop cap (§7); the 5-trading-session validity
+window (§6); the 100 setups / 30 symbols / 3 calendar years evaluation
+thresholds with the month-cluster bootstrap and majority-of-years baseline
+pass rule (§13); and the 10-bps-each-way/zero-commission costs assumption
+(§12).
 
 **Confirmed facts (no longer open), with citations:**
 - `get_watchlist()` is defined at `db/database.py:611-623`; `get_active_watchlist()`
