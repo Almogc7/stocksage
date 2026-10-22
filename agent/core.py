@@ -250,120 +250,146 @@ async def check_alerts(bot: Bot, chat_id: str) -> None:
 
     prices = get_multiple_prices(all_symbols)
 
+    # Per-symbol isolation (above) must not silently mask a SYSTEMIC failure
+    # (e.g. a regression that makes every symbol raise): if at least one
+    # symbol entered the try block and every one of them failed, re-raise so
+    # the cycle ends as a failure exactly like before this isolation was
+    # added -- job()'s existing "check cycle failed" handler logs it and
+    # run_checks() never reaches _ping_healthcheck() (agent/core.py:402-413).
+    # A symbol skipped by a gate (a plain `continue` inside the try, never
+    # hitting `except`) still counts as having entered and NOT failed.
+    entered_count = 0
+    failed_count = 0
+
     for symbol, price_data in prices.items():
         if not price_data:
             continue
 
-        change_pct = price_data["change_pct"]
+        entered_count += 1
+        try:
+            change_pct = price_data["change_pct"]
 
-        # Gate 1: positive price movement ≥ ALERT_MIN_PRICE_CHANGE (BUY only)
-        # DEBUG: fires for most symbols every tick — file log only, no console
-        if change_pct < ALERT_MIN_PRICE_CHANGE:
-            logger.debug(
-                "[ALERT SKIP] %s -- price change %+.1f%% below threshold %s%%",
-                symbol, change_pct, ALERT_MIN_PRICE_CHANGE,
-            )
-            continue
+            # Gate 1: positive price movement ≥ ALERT_MIN_PRICE_CHANGE (BUY only)
+            # DEBUG: fires for most symbols every tick — file log only, no console
+            if change_pct < ALERT_MIN_PRICE_CHANGE:
+                logger.debug(
+                    "[ALERT SKIP] %s -- price change %+.1f%% below threshold %s%%",
+                    symbol, change_pct, ALERT_MIN_PRICE_CHANGE,
+                )
+                continue
 
-        # Gate 2: in-memory dedup — instant, no DB, catches same-cycle dupes
-        key = _session_key(symbol)
-        if key in _alerted_this_session:
+            # Gate 2: in-memory dedup — instant, no DB, catches same-cycle dupes
+            key = _session_key(symbol)
+            if key in _alerted_this_session:
+                logger.info(
+                    "[DUPLICATE SKIP] %s -- already alerted today at %s",
+                    symbol, _alerted_this_session[key],
+                )
+                continue
+
+            # Gate 3: DB once-per-day cooldown — persists across restarts
+            if _in_cooldown(symbol):
+                logger.info("[ALERT SKIP] %s -- already alerted today", symbol)
+                continue
+
+            # Gate 4: expensive compute — only reached if all cheap gates passed
+            df = get_historical(symbol, period="1y")
+            if df is None:
+                continue
+
+            analysis  = full_analysis(symbol, df, price_data["price"])
+            score     = analysis["score"]
+            verdict   = analysis["verdict"]
+            rsi       = analysis["rsi"]
+            triggered = analysis.get("triggered_signals", [])
+
+            # Gate 7 candle selection — incomplete-bar bias avoidance.
+            #
+            # When the US market is open, yfinance includes today's in-progress
+            # daily session as the last row of the daily df. Its "close" is the
+            # most recent intraday price, NOT the final 4:00 PM close. Checking
+            # "green candle" (close > open) against an unfinished session is
+            # unreliable: a session that is currently green can close red.
+            # This is *incomplete-bar bias* (not look-ahead bias — no future data
+            # is used; the bar simply hasn't closed yet).
+            #
+            # When the market is closed, df.iloc[-1] IS the last completed session,
+            # so we use it directly. When the market is open, we step back one row
+            # to the previous confirmed close (df.iloc[-2]).
+            if is_market_open() and len(df) >= 2:
+                ref_candle = df.iloc[-2]
+            else:
+                ref_candle = df.iloc[-1]
+
+            last_close = float(ref_candle["close"])
+            last_open  = float(ref_candle["open"])
+
+            # Gate 5: composite score + verdict (full_analysis has already vetoed
+            # below-MA and out-of-band RSI to score 0 / NEUTRAL, so no separate
+            # trend or RSI re-check belongs here)
+            if score < ALERT_MIN_SCORE or verdict not in ALERT_VERDICTS:
+                logger.info(
+                    "[ALERT SKIP] %s -- score=%s verdict=%s below threshold",
+                    symbol, score, verdict,
+                )
+                continue
+
+            # Gate 6: required signals — healthy RSI band + volume spike, as
+            # judged by full_analysis itself
+            missing = [sig for sig in _REQUIRED_SIGNALS if sig not in triggered]
+            if missing:
+                logger.info(
+                    "[ALERT SKIP] %s -- missing required signals: %s",
+                    symbol, ", ".join(missing),
+                )
+                continue
+
+            # Gate 7: last candle must be green (momentum confirmation)
+            last_candle_green = last_close > last_open
+            if ALERT_REQUIRE_GREEN_CANDLE and not last_candle_green:
+                logger.info("[ALERT SKIP] %s -- last candle red, momentum fading", symbol)
+                continue
+
+            # All 7 gates passed → fire
+            # ASCII-only log messages: the console handler on Hebrew-codepage
+            # Windows can't encode chars like '→' (logging drops the line for
+            # that handler instead of crashing, but the console trace is lost).
             logger.info(
-                "[DUPLICATE SKIP] %s -- already alerted today at %s",
-                symbol, _alerted_this_session[key],
+                "[ALERT FIRE] %s score=%s RSI=%.1f change=%+.1f%% volume=spike -> SENDING",
+                symbol, score, rsi, change_pct,
             )
+
+            message = _fmt_buy_alert(symbol, change_pct, price_data["price"], analysis)
+
+            # Attempt chart — df is already in memory from Gate 4, no extra fetch
+            chart_bytes = generate_chart_image(symbol, df, analysis)
+            if chart_bytes:
+                caption = message if len(message) <= 1024 else message[:1021] + "..."
+                await send_alert_with_chart(bot, chat_id, caption, chart_bytes, symbol=symbol)
+            else:
+                logger.warning("[CHART FAIL] %s -- sending text alert only", symbol)
+                await send_alert(bot, chat_id, message, symbol=symbol)
+
+            # Mark in-memory first so next symbol sees the guard before DB settles
+            _alerted_this_session[key] = datetime.now().strftime("%H:%M")
+            # price_at_alert is the live fetcher price, NOT analysis["current_price"]
+            # (that key is silently overwritten with the last close — see CLAUDE.md)
+            log_alert(symbol, "BUY_SIGNAL", message,
+                      analysis=analysis, price_at_alert=price_data["price"])
+            logger.info("[agent] Alert sent: %s score=%s RSI=%.1f", symbol, score, rsi)
+        except Exception as e:
+            # One symbol's failure (bad fetch, analysis error, a downstream
+            # send/log_alert exception, etc.) must never abort the cycle for
+            # every other symbol -- mirrors run_morning_scan()'s existing
+            # per-symbol try/except (see its "[SCAN SKIP]" handler above).
+            # BaseException (KeyboardInterrupt/SystemExit) is deliberately
+            # NOT caught here.
+            logger.warning("[ALERT SKIP] %s: %s: %s", symbol, type(e).__name__, e)
+            failed_count += 1
             continue
 
-        # Gate 3: DB once-per-day cooldown — persists across restarts
-        if _in_cooldown(symbol):
-            logger.info("[ALERT SKIP] %s -- already alerted today", symbol)
-            continue
-
-        # Gate 4: expensive compute — only reached if all cheap gates passed
-        df = get_historical(symbol, period="1y")
-        if df is None:
-            continue
-
-        analysis  = full_analysis(symbol, df, price_data["price"])
-        score     = analysis["score"]
-        verdict   = analysis["verdict"]
-        rsi       = analysis["rsi"]
-        triggered = analysis.get("triggered_signals", [])
-
-        # Gate 7 candle selection — incomplete-bar bias avoidance.
-        #
-        # When the US market is open, yfinance includes today's in-progress
-        # daily session as the last row of the daily df. Its "close" is the
-        # most recent intraday price, NOT the final 4:00 PM close. Checking
-        # "green candle" (close > open) against an unfinished session is
-        # unreliable: a session that is currently green can close red.
-        # This is *incomplete-bar bias* (not look-ahead bias — no future data
-        # is used; the bar simply hasn't closed yet).
-        #
-        # When the market is closed, df.iloc[-1] IS the last completed session,
-        # so we use it directly. When the market is open, we step back one row
-        # to the previous confirmed close (df.iloc[-2]).
-        if is_market_open() and len(df) >= 2:
-            ref_candle = df.iloc[-2]
-        else:
-            ref_candle = df.iloc[-1]
-
-        last_close = float(ref_candle["close"])
-        last_open  = float(ref_candle["open"])
-
-        # Gate 5: composite score + verdict (full_analysis has already vetoed
-        # below-MA and out-of-band RSI to score 0 / NEUTRAL, so no separate
-        # trend or RSI re-check belongs here)
-        if score < ALERT_MIN_SCORE or verdict not in ALERT_VERDICTS:
-            logger.info(
-                "[ALERT SKIP] %s -- score=%s verdict=%s below threshold",
-                symbol, score, verdict,
-            )
-            continue
-
-        # Gate 6: required signals — healthy RSI band + volume spike, as
-        # judged by full_analysis itself
-        missing = [sig for sig in _REQUIRED_SIGNALS if sig not in triggered]
-        if missing:
-            logger.info(
-                "[ALERT SKIP] %s -- missing required signals: %s",
-                symbol, ", ".join(missing),
-            )
-            continue
-
-        # Gate 7: last candle must be green (momentum confirmation)
-        last_candle_green = last_close > last_open
-        if ALERT_REQUIRE_GREEN_CANDLE and not last_candle_green:
-            logger.info("[ALERT SKIP] %s -- last candle red, momentum fading", symbol)
-            continue
-
-        # All 7 gates passed → fire
-        # ASCII-only log messages: the console handler on Hebrew-codepage
-        # Windows can't encode chars like '→' (logging drops the line for
-        # that handler instead of crashing, but the console trace is lost).
-        logger.info(
-            "[ALERT FIRE] %s score=%s RSI=%.1f change=%+.1f%% volume=spike -> SENDING",
-            symbol, score, rsi, change_pct,
-        )
-
-        message = _fmt_buy_alert(symbol, change_pct, price_data["price"], analysis)
-
-        # Attempt chart — df is already in memory from Gate 4, no extra fetch
-        chart_bytes = generate_chart_image(symbol, df, analysis)
-        if chart_bytes:
-            caption = message if len(message) <= 1024 else message[:1021] + "..."
-            await send_alert_with_chart(bot, chat_id, caption, chart_bytes, symbol=symbol)
-        else:
-            logger.warning("[CHART FAIL] %s -- sending text alert only", symbol)
-            await send_alert(bot, chat_id, message, symbol=symbol)
-
-        # Mark in-memory first so next symbol sees the guard before DB settles
-        _alerted_this_session[key] = datetime.now().strftime("%H:%M")
-        # price_at_alert is the live fetcher price, NOT analysis["current_price"]
-        # (that key is silently overwritten with the last close — see CLAUDE.md)
-        log_alert(symbol, "BUY_SIGNAL", message,
-                  analysis=analysis, price_at_alert=price_data["price"])
-        logger.info("[agent] Alert sent: %s score=%s RSI=%.1f", symbol, score, rsi)
+    if entered_count > 0 and failed_count == entered_count:
+        raise RuntimeError(f"all {entered_count} symbols failed")
 
 
 # ── Dead-man's switch ─────────────────────────────────────────────────────────

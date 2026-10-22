@@ -260,6 +260,21 @@ def calc_swing_levels(df: pd.DataFrame, lookback: int = 50) -> dict:
 
 # ── Full Analysis ─────────────────────────────────────────────────────────────
 
+def _score_to_verdict(score: int) -> str:
+    """Maps a 0-100 opportunity score to its verdict label. Extracted
+    unchanged from full_analysis()'s inline branching so the exact score
+    cutoffs can be unit-tested directly, independent of whatever real
+    score values the scoring pipeline can produce."""
+    if score >= 75:
+        return "STRONG BUY"
+    elif score >= 55:
+        return "BUY"
+    elif score >= 35:
+        return "WATCH"
+    else:
+        return "NEUTRAL"
+
+
 def full_analysis(symbol: str, df: pd.DataFrame, current_price: float,
                   use_composite_volume: bool = False, market_open: bool = False) -> dict:
     """use_composite_volume: opt-in only, default False -- every existing
@@ -372,13 +387,6 @@ def full_analysis(symbol: str, df: pd.DataFrame, current_price: float,
     score = max(0, min(100, score))
 
     # ── Verdict ───────────────────────────────────────────────────────────────
-    if score >= 75:
-        verdict = "STRONG BUY"
-    elif score >= 55:
-        verdict = "BUY"
-    elif score >= 35:
-        verdict = "WATCH"
-    else:
-        verdict = "NEUTRAL"
+    verdict = _score_to_verdict(score)
 
     return _base_result(score, verdict, triggered)

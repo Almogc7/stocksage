@@ -162,6 +162,184 @@ class TestAlertGates(unittest.TestCase):
         log_alert2.assert_not_called()
         fa2.assert_not_called()
 
+    # ── Per-symbol isolation (PR 0a) ─────────────────────────────────────────
+
+    def test_one_symbols_analysis_raising_does_not_abort_the_cycle(self):
+        """One symbol's full_analysis() raises; the other symbol still
+        alerts, and the failed symbol leaves no dedup/cooldown state."""
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+
+        prices = {
+            "GOOD": {"price": 105.0, "change_pct": 2.0},
+            "BAD":  {"price": 105.0, "change_pct": 2.0},
+        }
+
+        def fake_full_analysis(symbol, df, price):
+            if symbol == "BAD":
+                raise RuntimeError("boom")
+            return _analysis()
+
+        with patch.object(self.core, "get_active_watchlist",
+                          return_value={"Cat": ["GOOD", "BAD"]}), \
+             patch.object(self.core, "get_multiple_prices", return_value=prices), \
+             patch.object(self.core, "was_alerted_today", return_value=False), \
+             patch.object(self.core, "get_historical", return_value=_df()), \
+             patch.object(self.core, "full_analysis", side_effect=fake_full_analysis), \
+             patch.object(self.core, "is_market_open", return_value=False), \
+             patch.object(self.core, "generate_chart_image", return_value=None), \
+             patch.object(self.core, "log_alert") as log_alert:
+            _run(self.core.check_alerts(bot, CHAT_ID))
+
+        log_alert.assert_called_once()
+        self.assertEqual(log_alert.call_args.args[0], "GOOD")
+        good_key = self.core._session_key("GOOD")
+        bad_key = self.core._session_key("BAD")
+        self.assertIn(good_key, self.core._alerted_this_session)
+        self.assertNotIn(bad_key, self.core._alerted_this_session)
+
+    def test_failure_after_send_keeps_session_dedup_set(self):
+        """log_alert() raises AFTER the message was sent: the in-memory
+        session dedup mark stays set, so the next tick does not re-send.
+
+        With only one symbol in this watchlist, that one symbol failing
+        also means "all N (=1) symbols failed" -- the systemic-failure
+        re-raise (see test_all_symbols_failing_raises below) fires on this
+        first call too. That's correct, expected behavior, not a regression:
+        a one-symbol cycle where the only symbol failed IS a fully-failed
+        cycle. The dedup mark is still set before the raise, since marking
+        happens before log_alert() is even called."""
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+
+        price_data = {"price": 105.0, "change_pct": 2.0}
+
+        def run_once():
+            with patch.object(self.core, "get_active_watchlist",
+                              return_value={"Cat": ["NVDA"]}), \
+                 patch.object(self.core, "get_multiple_prices",
+                              return_value={"NVDA": price_data}), \
+                 patch.object(self.core, "was_alerted_today", return_value=False), \
+                 patch.object(self.core, "get_historical", return_value=_df()), \
+                 patch.object(self.core, "full_analysis", return_value=_analysis()) as fa, \
+                 patch.object(self.core, "is_market_open", return_value=False), \
+                 patch.object(self.core, "generate_chart_image", return_value=None), \
+                 patch.object(self.core, "log_alert",
+                              side_effect=RuntimeError("db write failed")):
+                _run(self.core.check_alerts(bot, CHAT_ID))
+            return fa
+
+        with self.assertRaises(RuntimeError):
+            run_once()
+        bot.send_message.assert_awaited_once()
+        key = self.core._session_key("NVDA")
+        self.assertIn(key, self.core._alerted_this_session)
+
+        # Second tick: in-memory dedup (Gate 2) now skips before full_analysis
+        # is reached again -- no raise this time, since the symbol never
+        # enters the except branch (Gate 2's `continue` isn't a failure).
+        fa2 = run_once()
+        fa2.assert_not_called()
+
+    def test_all_symbols_failing_raises(self):
+        """Every symbol that entered the try block raised -> check_alerts()
+        re-raises, so the cycle is reported as a failure exactly like before
+        per-symbol isolation existed (job()'s handler logs it; the ping is
+        skipped -- see test_run_checks_ping_behavior below)."""
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+
+        prices = {
+            "A": {"price": 105.0, "change_pct": 2.0},
+            "B": {"price": 105.0, "change_pct": 2.0},
+        }
+
+        def always_raise(symbol, df, price):
+            raise RuntimeError(f"boom for {symbol}")
+
+        with patch.object(self.core, "get_active_watchlist",
+                          return_value={"Cat": ["A", "B"]}), \
+             patch.object(self.core, "get_multiple_prices", return_value=prices), \
+             patch.object(self.core, "was_alerted_today", return_value=False), \
+             patch.object(self.core, "get_historical", return_value=_df()), \
+             patch.object(self.core, "full_analysis", side_effect=always_raise), \
+             patch.object(self.core, "is_market_open", return_value=False), \
+             patch.object(self.core, "generate_chart_image", return_value=None), \
+             patch.object(self.core, "log_alert") as log_alert:
+            with self.assertRaisesRegex(RuntimeError, "all 2 symbols failed"):
+                _run(self.core.check_alerts(bot, CHAT_ID))
+
+        log_alert.assert_not_called()
+        self.assertNotIn(self.core._session_key("A"), self.core._alerted_this_session)
+        self.assertNotIn(self.core._session_key("B"), self.core._alerted_this_session)
+
+    def test_zero_symbols_entered_does_not_raise(self):
+        """Every symbol's price_data is None (never reaches the try block
+        at all) -> entered_count stays 0 -> no systemic-failure re-raise,
+        behavior identical to before this PR."""
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+
+        with patch.object(self.core, "get_active_watchlist",
+                          return_value={"Cat": ["A", "B"]}), \
+             patch.object(self.core, "get_multiple_prices",
+                          return_value={"A": None, "B": None}), \
+             patch.object(self.core, "full_analysis") as fa, \
+             patch.object(self.core, "log_alert") as log_alert:
+            _run(self.core.check_alerts(bot, CHAT_ID))  # must not raise
+
+        fa.assert_not_called()
+        log_alert.assert_not_called()
+
+    def test_run_checks_ping_behavior(self):
+        """Through run_checks(): the healthcheck ping is NOT sent when every
+        symbol failed (the cycle itself now raises before reaching the ping
+        call, agent/core.py:402-413), and IS sent in a mixed cycle where at
+        least one symbol succeeded."""
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.send_photo = AsyncMock()
+
+        def run_checks_with(full_analysis_side_effect):
+            prices = {
+                "A": {"price": 105.0, "change_pct": 2.0},
+                "B": {"price": 105.0, "change_pct": 2.0},
+            }
+            with patch.object(self.core, "get_active_watchlist",
+                              return_value={"Cat": ["A", "B"]}), \
+                 patch.object(self.core, "get_multiple_prices", return_value=prices), \
+                 patch.object(self.core, "was_alerted_today", return_value=False), \
+                 patch.object(self.core, "get_historical", return_value=_df()), \
+                 patch.object(self.core, "full_analysis",
+                              side_effect=full_analysis_side_effect), \
+                 patch.object(self.core, "is_market_open", return_value=True), \
+                 patch.object(self.core, "generate_chart_image", return_value=None), \
+                 patch.object(self.core, "log_alert"), \
+                 patch.object(self.core, "_ping_healthcheck") as ping:
+                try:
+                    _run(self.core.run_checks(bot, CHAT_ID))
+                except RuntimeError:
+                    pass
+            return ping
+
+        def all_fail(symbol, df, price):
+            raise RuntimeError(f"boom for {symbol}")
+
+        def mixed(symbol, df, price):
+            if symbol == "B":
+                raise RuntimeError("boom for B")
+            return _analysis()
+
+        ping_all_fail = run_checks_with(all_fail)
+        ping_all_fail.assert_not_called()
+
+        ping_mixed = run_checks_with(mixed)
+        ping_mixed.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
