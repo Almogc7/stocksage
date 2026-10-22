@@ -140,19 +140,25 @@ time do not shift DST on the same calendar dates, which is exactly the
 mismatch `CLAUDE.md` already flags for the existing 16:35 IL morning-scan
 trigger. **Reasoned default**: run the EOD setup scan at a **fixed, late-night
 Israel-time slot — but not the exact 01:30 IL slot `scripts/log_composite_signals.py`
-already uses, and not concurrent with it.** Propose **03:00 IL** — staggered
-to run roughly 30 minutes **after** the existing 02:30 IL nightly watchlist
-evaluation (the Windows Scheduled Task "StockSage Watchlist Evaluation," per
-project memory) rather than at the same instant as `log_composite_signals.py`'s
-01:30 IL run. Rationale for staggering: this spec's job is a new,
-lower-priority, observation-only job — running it at the identical minute as
-an existing nightly job risks competing for the same yfinance rate limits,
-DB locks, or interleaved log output. (Running after 02:30 IL is **not**
-required by any dependency on that job's *output* — §2's universe definition
-reads `wl_state`/category/`security_type` directly from the `watchlist`
-table at scan time, so it needs no prior job to have finished first; 03:00
-IL is chosen purely to avoid resource contention with the 01:30 IL job, not
-because of a data dependency.) The underlying
+already uses, and not concurrent with it.** **Propose 03:00 IL, and the reason is the 01:30 IL composite job, not the
+02:30 IL watchlist evaluation — §3 and §15 agree on this.** The sole
+contention this slot is chosen to avoid is with `scripts/log_composite_signals.py`'s
+01:30 IL run: a 90-minute gap, versus running at the identical minute, which
+risks competing for the same yfinance rate limits, DB locks, or interleaved
+log output. 03:00 IL is **not** staggered *relative to* the existing 02:30 IL
+nightly watchlist evaluation (the Windows Scheduled Task "StockSage Watchlist
+Evaluation," per project memory) — it only happens to land after it. (Running
+after 02:30 IL is also **not** required by any dependency on that job's
+*output* — §2's universe definition reads `wl_state`/category/`security_type`
+directly from the `watchlist` table at scan time, so it needs no prior job to
+have finished first.) **Before fixing this slot, check the typical duration
+of the 02:30 IL watchlist evaluation in its own log**
+(`logs/watchlist_evaluation_task.log`, per project memory) — if that job
+regularly runs long enough to approach or pass 03:00, the two jobs could
+still collide even though neither depends on the other's output, which would
+reintroduce exactly the resource contention this slot exists to avoid, just
+against a different job. This check, and whatever it implies for the actual
+slot, is an open decision (§15, item 8). The underlying
 reason a fixed IL-clock time is used at all — several hours after any
 plausible US-market close, in any DST alignment — is unchanged from the
 original rationale: it's the one pattern in this repo already proven to
@@ -166,6 +172,23 @@ data), then **skip the scan entirely for that night** and log reason code
 `DATA_NOT_FINAL` — this prevents silently scanning on stale or incomplete
 data due to a provider lag, rather than either blocking indefinitely or
 proceeding on bad data.
+
+**Idempotency — act only once per newly completed US session.** Before
+running any other check in this section, the scan compares the **expected
+last trading session's date** (per the holiday-aware calendar below) against
+a **persisted "last scanned session date"** value stored in the DB (a new,
+additive table or row, following §12's additive-only posture). If the
+expected session date is **not newer** than the stored value — e.g. the
+03:00 IL job happens to fire twice before a new US session has closed, or a
+retry runs after a prior success — the scan **exits silently**: no candidate
+rows are logged (§12), and **no Telegram message is sent at all, including
+the zero-setups message** (§13b). This is deliberately different from
+`DATA_NOT_FINAL` above (which logs the attempt and is itself a visible signal
+that something needs attention) — an idempotency skip is not an error, it is
+nothing happening, so nothing should be written or sent. The stored value is
+updated only **after** a scan completes and actually processes a newer
+session (never before), so a crash mid-scan is retried on the next tick
+rather than silently marked done.
 
 **Holiday handling — reuse, do not reinvent.** `services/watchlist_scheduler.py:131-157`
 (`us_market_holidays()`, `is_us_market_holiday()`, `is_us_market_day()`) is
@@ -207,6 +230,21 @@ second, independent precedent for weighting these same three checks —
 useful as a pattern shape, but not reused directly, since it returns a 0-1
 weighted score rather than a hard pass/fail; this spec needs a hard gate,
 not a score.
+
+**Bulk download failures.** The universe (§2) is fetched in **chunked bulk
+calls — roughly 50 symbols per call** — not one request per symbol and not
+one request for the entire universe at once, mirroring the batching already
+used by `get_multiple_prices()`-style calls elsewhere in the repo. A symbol
+whose chunk call fails outright for it specifically (network error, provider
+error, an empty/missing response for that symbol within an otherwise-
+successful chunk) is logged with reason code `DATA_FETCH_FAILED` (§12) and
+excluded from that night's candidate set — a per-symbol outcome, not by
+itself a reason to abort the scan. **If more than 10% of the universe fails
+to download** in a given night's run, the failure is treated as systemic
+rather than per-symbol: the whole night is marked `DATA_NOT_FINAL` (reusing
+the retry-once-then-skip handling above), rather than proceeding on a
+universe that's missing more than a tenth of its members — which could
+itself bias which setups get a chance to be found that night.
 
 ---
 
@@ -301,13 +339,17 @@ lines above:
 *current* close — not a *recency* concept.** §5's precise setup definition
 needs "the most recent confirmed swing high **by bar date**," which this
 function's return shape cannot supply. **A new, separately tested helper is
-required** — e.g. `find_confirmed_swing_points(df, lookback=50)` — that
+required** — e.g. `find_confirmed_swing_highs(df, lookback=50)` — that
 applies the **identical** 5-bar fractal rule (`i-2,i-1,i,i+1,i+2` comparison,
 same `lookback` default) but returns **`(bar_date, price)` pairs** for each
-confirmed swing high and low, preserving both identity and chronological
-order. This is new work, not a modification of `calc_swing_levels()` (which
-stays untouched and can still be used wherever only the price-proximity
-values are needed, e.g. parts of §8's target logic below).
+confirmed swing **high**, preserving both identity and chronological order.
+This is new work, not a modification of `calc_swing_levels()` (which stays
+untouched and can still be used wherever only the price-proximity values are
+needed, e.g. parts of §8's target logic below). **This helper is needed for
+`SH` only.** The earlier draft also needed it for swing lows (to find `SL`);
+that is no longer the case — see the revised `SL` definition below, which
+replaces "most recent confirmed swing low" with a plain running-minimum low
+that needs no fractal confirmation at all.
 
 **Reusable helpers:**
 - `calc_swing_levels(df, lookback=50)` (`analyzers/technical.py:229-258`) —
@@ -319,9 +361,12 @@ values are needed, e.g. parts of §8's target logic below).
   no change from the existing default for v1, to minimize new parameters
   (see §13 for V2's 120-bar variant, which tests this choice rather than
   assuming it).
-- The **new** `find_confirmed_swing_points()` helper described above — used
-  wherever this spec needs "the most recent confirmed swing high/low **by
-  date**" (§5 items 2/6, §7).
+- The **new** `find_confirmed_swing_highs()` helper described above — used
+  wherever this spec needs "the most recent confirmed swing high **by
+  date**" (§5 items 2/6). Swing **lows** are no longer identified through
+  this helper or any fractal confirmation — `SL` (§5 item 2, §7) is a plain
+  running-minimum low over the bars after `SH`, needing no confirmation of
+  its own.
 - `calc_atr(df)` (`:178-200`) for the stop/structural buffer (§7). Its
   existing `stop_loss_1x/15x`/`take_profit_2x` fields (`:197-199`) are **not**
   reused directly — different multipliers are needed for a 2-6 week hold
@@ -340,16 +385,22 @@ correct, v1 drops pivot points entirely — every resistance/trigger reference
 below comes solely from `calc_swing_levels()`. No part of this spec treats a
 pivot level as a secondary fallback.
 
-**Confirmation-lag requirement — applies identically to `calc_swing_levels()`
-and to the new `find_confirmed_swing_points()` helper, since both apply the
-same rule.** The 5-bar fractal check (`analyzers/technical.py:239-243`)
+**Confirmation-lag requirement — applies to `calc_swing_levels()` and to the
+new `find_confirmed_swing_highs()` helper, since both apply the same rule to
+swing highs. It does NOT apply to `SL`**, which per the revised definition
+below is a plain running-minimum low with no fractal confirmation to wait
+on — `SL`'s own "at least 2 completed sessions old" requirement (§5 item 2)
+is a separate, unrelated rule (a staleness guard against anchoring to a low
+that could still be undercut by the very next bar), not this confirmation
+lag; the two should not be conflated even though both happen to use the
+number 2. The 5-bar fractal check (`analyzers/technical.py:239-243`)
 requires 2 bars on *each side* of candidate index `i` (`i-2,i-1,i,i+1,i+2`)
 within the lookback window.
 Mechanically, this already means **the last 2 bars of any window can never
 qualify as a swing point** — there is no `i+1`/`i+2` data after them yet
 inside that window. This is a real, existing property of the function, not
 something new to add. Two requirements follow:
-1. A swing high/low is **only "confirmed"** once 2 further completed
+1. A swing **high** is **only "confirmed"** once 2 further completed
    sessions exist after it — document this as an inherent 2-session
    confirmation lag.
 2. **For both production and any historical replay, the dataframe passed to
@@ -372,7 +423,7 @@ validation and §4's trend/eligibility filter:
    completed bar): `above_sma150` is true, `sma150 > sma200`, and
    `sma150_today > sma150_20_sessions_ago` (rising).
 
-2. **Confirmed swing structure**: using the **new** `find_confirmed_swing_points(df, lookback=50)`
+2. **Confirmed swing structure**: using the **new** `find_confirmed_swing_highs(df, lookback=50)`
    helper (above — not `calc_swing_levels()`, which cannot supply dates),
    truncated to data through the scan date (§5's confirmation-lag rule),
    identify:
@@ -382,12 +433,27 @@ validation and §4's trend/eligibility filter:
      `nearest_resistance` (a *price-proximity* concept — nearest to the
      current close, which could easily be an older point than the most
      recent one).
-   - `SL` = the most recent **confirmed** swing low **by bar date** that
-     occurs chronologically *after* `SH` and before the scan date (i.e., the
-     pullback low following that high).
+   - `SL` = **the lowest LOW of every bar strictly after `SH`'s bar, through
+     and including the scan date** — a plain running minimum over that
+     window, **regardless of whether that bar's low is itself a confirmed
+     5-bar fractal swing point.** This replaces the earlier "most recent
+     confirmed swing low" definition: a literal lowest-low needs no fractal
+     confirmation of its own, so `SL` is always identifiable the moment a
+     pullback exists, rather than waiting on a confirmation lag that could
+     leave a real pullback low undetected. **`SL`'s bar must be at least 2
+     completed sessions old as of the scan date** (i.e., not one of the 2
+     most recent bars) — a staleness guard against anchoring to a low that
+     is still fresh enough to be undercut by the very next session, which
+     would silently move `SL` (and therefore the stop and the pullback
+     depth) from one scan to the next on a still-forming low. This 2-session
+     rule is independent of, and not to be conflated with, the unrelated
+     5-bar-fractal confirmation lag that still applies to `SH` (above).
+     **Both the pullback-depth check (item 3) and the stop (§7) use this
+     identical `SL` value** — there is no separate recomputation for either.
    If either `SH` or `SL` cannot be identified (e.g., too few confirmed swing
-   points in the lookback window), no setup is produced for that symbol —
-   logged with reason code `NO_SWING_STRUCTURE`.
+   highs in the lookback window, or no bar exists after `SH` old enough to
+   qualify as `SL`), no setup is produced for that symbol — logged with
+   reason code `NO_SWING_STRUCTURE`.
 
 3. **Pullback depth — reasoned default: `(SH − SL) ≥ 1.0 × ATR(14)`.**
    Rationale: a floor only, ensuring `SH` and `SL` represent a genuine
@@ -412,7 +478,7 @@ validation and §4's trend/eligibility filter:
 
 6. **Trigger level — deterministic, no new parameter:** `trigger_price = SH`
    exactly — i.e. the price of the most-recent-by-date confirmed swing high
-   identified in step 2 via `find_confirmed_swing_points()`, **not**
+   identified in step 2 via `find_confirmed_swing_highs()`, **not**
    `calc_swing_levels()`'s `nearest_resistance` value (a different,
    price-proximity concept, see above — using it here would silently pick
    whichever confirmed high is nearest in *price* to the current close,
@@ -438,14 +504,17 @@ validation and §4's trend/eligibility filter:
 
 9. **Staleness — identity-based, not "is this still the most recent point."**
    A pending setup is cancelled and logged with reason code `STALE_STRUCTURE`
-   **only if** the *specific* `SH` or `SL` point this setup was built on is
-   no longer a confirmed point in the (re-truncated, updated) lookback window
-   — e.g., it has rolled out of the `lookback=50`/120-bar window entirely, or
-   re-applying `find_confirmed_swing_points()`'s fractal rule to updated data
-   no longer confirms it as a swing point for some reason — or that specific
-   point has been invalidated per §6's pre-fill invalidation rule. **A newly
-   formed, different (e.g. higher) swing low appearing after `SL` must NOT,
-   by itself, cancel the setup** — the check is "is the original `(SH, SL)`
+   **only if**: the *specific* `SH` point this setup was built on is no
+   longer a confirmed swing high in the (re-truncated, updated) lookback
+   window — e.g., it has rolled out of the `lookback=50`/120-bar window
+   entirely, or re-applying `find_confirmed_swing_highs()`'s fractal rule to
+   updated data no longer confirms it as a swing point for some reason — **or**
+   the specific `SL` bar this setup was built on has itself rolled out of the
+   lookback window (its own, simpler staleness condition, since `SL` per §5
+   item 2 is a plain running-minimum low with no fractal confirmation to
+   lose) — **or** either point has been invalidated per §6's pre-fill
+   invalidation rule. **A newly formed, different (e.g. lower) low appearing
+   after `SL` must NOT, by itself, cancel the setup** — the check is "is the original `(SH, SL)`
    pair still identifiable and valid," never "is `(SH, SL)` still the *most
    recent* confirmed pair as of this later scan." Without this identity
    restriction, nearly every subsequent EOD scan would stale out a pending
@@ -579,22 +648,45 @@ is unaffected by *when* within the session the cross is detected, since both
 `trigger` and `session_open` are fixed values for that session, not
 poll-time-dependent.
 
-**Pre-fill invalidation (reason code `INVALIDATED_BEFORE_FILL`).** A pending,
-not-yet-filled setup is cancelled before any fill occurs if, on any session
-within the validity window prior to the fill session: that session's **LOW is
-at or below the stop level**, OR that session's **CLOSE is below the pullback
-low (`SL`)**. Either condition means the structural premise has already
-broken down before the planned entry ever happened — there is nothing left
-to fill into. **On the fill session itself** (the session whose HIGH first
-reaches the trigger): if that *same* session's LOW is *also* at or below the
-stop, daily bars cannot reveal which happened first intraday (the breakout
-above trigger, or the drop to stop) — **assume the stop was hit**, and log
-it as `INVALIDATED_BEFORE_FILL` rather than as a filled-then-immediately-
-stopped-out trade. This is the same conservative same-day tie-break
-convention already reused elsewhere in this spec from `compute_outcome()`
-(stop checked first, `scripts/populate_outcomes.py:86-96`) — applied here one
-step earlier, at the fill decision itself rather than only at outcome
-computation.
+**Pre-fill invalidation (reason code `INVALIDATED_BEFORE_FILL`) — applies
+only to sessions strictly before the fill session.** A pending, not-yet-filled
+setup is cancelled if, on any session *before* the session whose HIGH first
+reaches the trigger: that session's **LOW is at or below the stop level**,
+OR that session's **CLOSE is below the pullback low (`SL`)**. Either
+condition means the structural premise has already broken down before the
+planned entry ever happened — there is nothing left to fill into. **This
+rule never looks at the fill session itself** — the fill session's own
+stop-vs-trigger ambiguity is handled separately, below.
+
+**Fill-day stop-out (event code `FILLED_STOPPED_SAME_DAY`) — the fill
+session's own LOW also breaches the stop.** If the session whose HIGH first
+reaches the trigger (`HIGH ≥ trigger`) *also* has its **LOW at or below the
+stop** on that same bar, daily bars cannot reveal which happened first
+intraday (the breakout above trigger, or the drop to stop). An earlier draft
+of this spec treated this case as `INVALIDATED_BEFORE_FILL` (never filled).
+**This is revised: the trade is treated as FILLED and stopped out the same
+day, not excluded.** Fill price = `max(trigger, session_open)` (§6's
+ordinary fill model, unchanged); exit price = `min(stop, session_open)` —
+the symmetric worse-case convention, so a session that gapped below the stop
+exits at that gap-down open rather than being credited the nominal stop
+level (mirroring §12's general gap-through-stop exit-price rule). Realized R
+is therefore approximately **-1** before costs (exactly -1 only when
+`session_open` sits between `stop` and `trigger`, in which case fill =
+trigger and exit = stop exactly; worse than -1 when the session gapped below
+the stop). This event is logged under its own code, `FILLED_STOPPED_SAME_DAY`
+— distinct from `INVALIDATED_BEFORE_FILL` (never filled) and from an
+ordinary post-fill stop-out — and **is included in every outcome sample**
+(§12's outcome tables, §13's replay statistics) exactly like any other
+filled-and-resolved trade. **Rationale for including it, not excluding it:
+excluding same-day stop-outs would silently drop exactly the trades where the
+breakout failed immediately, biasing every aggregate outcome statistic (mean
+R, hit rate) upward relative to what a real trader following this system
+would have experienced.** This supersedes the earlier same-day tie-break
+convention that assumed the stop alone and logged `INVALIDATED_BEFORE_FILL`
+for this case; the stop-checked-first convention reused elsewhere in this
+spec from `compute_outcome()` (`scripts/populate_outcomes.py:86-96`) is
+otherwise unchanged for every other same-day tie (e.g. stop-vs-target ties
+after the fill, per the Fill model paragraph above).
 
 **Trigger-job infrastructure.** The intraday trigger check is its **own
 supervised task**, not folded into `agent/core.py`'s existing
@@ -637,8 +729,11 @@ outcome because the live poller happened to miss it.
 ## 7. Stop rule
 
 **Structural stop**: the pullback low `SL` identified in §5's setup
-definition (step 2/7) — **not** a separately recomputed "nearest support,"
-which could point to a different, older swing low — minus an ATR buffer.
+definition (step 2/7) — per the revised definition there, the plain lowest
+LOW of the bars after `SH`, at least 2 completed sessions old, **not** a
+confirmed fractal swing low and **not** a separately recomputed "nearest
+support" either, either of which could point to a different, older level —
+minus an ATR buffer.
 
 **Reasoned default — buffer = 0.5× ATR(14)** beyond the swing low.
 Rationale: gives room below the structural low to avoid noise-driven
@@ -937,12 +1032,19 @@ confirmed `SH`/`SL` pair found), `NO_RESISTANCE` (§8), `STOP_CAP_EXCEEDED`
 original `SH`/`SL` point itself is no longer confirmed or valid, not merely
 superseded), `INVALIDATED_BEFORE_FILL` (§6, pre-fill stop/close breach),
 `CHASE_RR_BELOW_3` (post-cross recompute failure, §6), `DATA_NOT_FINAL` (§3,
-last bar not yet settled after one retry), `EXCLUDED_WL_STATE` /
+last bar not yet settled after one retry, or more than 10% of the universe
+failed to download), `DATA_FETCH_FAILED` (§3, a single symbol's bulk-download
+chunk failed outright; excluded from that night's candidates, not by itself a
+reason to abort the scan unless the 10%-universe-wide threshold is crossed,
+in which case the night is `DATA_NOT_FINAL` instead), `EXCLUDED_WL_STATE` /
 `EXCLUDED_CATEGORY` / `EXCLUDED_SECURITY_TYPE` (§2, universe-definition
 exclusions, logged even though these are pre-candidate filters, for full
 auditability of the universe itself), `MISSED_LIVE` (§6, an event code, not
 a rejection — the EOD reconciliation found a fill the live trigger job
-missed; the setup is still treated as filled). Every candidate row also
+missed; the setup is still treated as filled), `FILLED_STOPPED_SAME_DAY` (§6,
+an event code, not a rejection — the fill session's LOW also breached the
+stop; the setup is treated as filled and immediately stopped out, included
+in every outcome sample). Every candidate row also
 carries the regime value (BULL/BEAR) regardless of which reason, if any,
 rejected it first — per §9's "logged on every candidate" requirement.
 
@@ -970,6 +1072,25 @@ the parts the two share: the same-day stop-before-target tie-break
 (`:86-96`), MAE measured through the exit bar, and T+0 exclusion — proving
 no silent algorithmic drift between the two implementations — while
 differing only in horizon length (30 vs 10 sessions) and target definition.
+
+**Exit price mechanics — same rule for the stop and the target barrier.**
+If the session that triggers a **stop** exit **opens at or below the stop
+price**, the exit price is **that session's open**, not the stop level
+itself — a gap through the stop is worse than the nominal stop, and
+crediting the nominal stop would overstate the realized R (this is the same
+rule applied to the fill-day case above, §6's `FILLED_STOPPED_SAME_DAY`). If
+the session that triggers a **target** exit **opens above the target**, the
+exit price is **the target itself**, not the open — a gap above the target
+is upside this system did not need to wait for and is not credited, keeping
+the target a disciplined take-profit rather than a moving one. (The
+asymmetry is intentional: downside gaps are realized in full; upside gaps
+beyond target are capped at target.) The costs assumption below (10 bps
+slippage) applies on top of whichever exit price results from this rule,
+exactly as it applies to every other entry/exit in this spec. **The outcome
+module's parity tests above must include a gap-through-stop case** — a
+synthetic bar whose open is below the stop — verifying the module's exit
+price equals that bar's open, not the stop constant, before any non-gap
+case is trusted.
 
 `first_barrier_hit` enum for this spec's outcome table: `stop` / `target` /
 `timeout_30` — mirroring the existing `alert_outcomes.first_barrier_hit`
@@ -1078,22 +1199,34 @@ breadth across symbols and across years guards against a result that is
 really just "this one stock had a good run" or "this one year was
 unusually favorable.")
 
-**Baseline — a mechanics-matched control, not "same-date peers."** For each
-V1 (or V2/V3/V4) setup that actually **fills** on a given date, the control
-group is: **other symbols that passed §4's trend and liquidity filters on
-that same fill date** (not the full §5 setup definition — just trend +
-liquidity), each hypothetically **entered at that date's session open**, with
-a **stop sized at the same ATR-multiple of risk as the actual V1 setup being
-compared** (i.e., if that day's real setup had risk `= k × ATR`, the control
-uses the same `k`, scaled to the control symbol's own ATR — not always the
-1.5×ATR minimum), a **target at exactly 3× that risk** (fixed, not
-resistance-based, deliberately — to isolate whether V1's specific
-entry-timing/structure mechanism adds value over an equally-risk-sized,
-arbitrarily-timed entry on an otherwise-eligible stock), and the **same
-30-session timeout and stop-first tie-break** as every other outcome
-computation in this spec (§12). This replaces the earlier, looser
-"same-date peers" framing with a control that is matched on sizing mechanics,
-not just on calendar date.
+**Baseline — a mechanics-matched control, averaged over all eligible peers on
+the fill date, giving exactly one paired difference per setup.** For each V1
+(or V2/V3/V4) setup that actually **fills** on a given date, the control is
+**not** a single peer, nor a set of individually-compared peers — it is the
+**mean realized R-multiple across every symbol that passed §4's trend and
+liquidity filters on that same fill date** (not the full §5 setup definition
+— just trend + liquidity), each hypothetically **entered at that date's
+session open**, with a stop **and** a target **both sized to the same
+ATR-multiples as the actual setup being compared** — i.e., if that day's real
+setup had risk `= k_stop × ATR` and target `= k_target × ATR` (its own
+realized values, **not a fixed 3R** — a setup's real resistance-based target,
+§8, typically exceeds the 3:1 minimum), every eligible peer's hypothetical
+control trade uses those same `k_stop`/`k_target` multiples, scaled to each
+peer's own ATR — and the same 30-session timeout and stop-first tie-break
+(§12) as every other outcome computation in this spec. This yields exactly
+**one control value per fill date**: the mean R across that date's eligible
+peers. **The comparison unit is therefore one paired difference per filled
+setup** — `(setup's realized R) − (that date's mean peer-control R)` — not
+two separately-compared distributions. **The month-cluster bootstrap (below)
+resamples by calendar month over these paired differences**, each setup
+contributing exactly one difference, clustered by the setup's own fill
+month — not over the setups' and controls' raw R values taken separately.
+Independently of that paired-difference bootstrap, **hit rate and mean R are
+also reported separately for setups and for controls** (unpaired, purely
+descriptive), so a reader can see the two groups' raw performance before
+looking at the paired difference the bootstrap actually tests. This replaces
+both the earlier "same-date peers" framing and the fixed-3R-target version of
+the mechanics-matched control.
 
 **Metric and interval (to be frozen in the pre-registration file, outlined
 here):** primary metric is **mean R-multiple per setup** (realized R at
@@ -1101,9 +1234,12 @@ exit, §12, net of the costs assumption, §12), with a **month-cluster
 bootstrap confidence interval** — resampling by calendar month rather than
 by individual setup, since setups with overlapping hold periods (up to 30
 sessions each) are not independent draws and a naive per-setup bootstrap
-would understate the true uncertainty. **R distributions** for each variant
-and for the mechanics-matched baseline are compared using this same
-bootstrap procedure. **The pre-registration file will contain the exact pass
+would understate the true uncertainty. **The paired differences described
+above (setup R minus that fill date's mean peer-control R) are what the
+bootstrap resamples**; each variant's and the baseline's raw R distributions
+(hit rate, mean R) are additionally reported separately, unpaired, as
+descriptive context (§13's baseline paragraph). **The pre-registration file
+will contain the exact pass
 rule** for declaring a variant distinguishable from baseline — including a
 **majority-of-years condition** (e.g., outperforming the baseline in a
 majority of the replay's calendar years, not merely in aggregate) — before
@@ -1186,7 +1322,8 @@ successfully, found nothing" apart from "didn't run."
 
 1. **PR 0 — split into three independent PRs**, each separately mergeable:
    - **PR 0a — characterization tests on Stack A, PLUS one deliberate behavior
-     change: a per-symbol try/except inside `check_alerts()`.** Add tests
+     change: a per-symbol try/except inside `check_alerts()`. MERGED — DONE
+     (742 tests passing).** Add tests
      locking down *current* Stack A behavior before anything new touches
      shared helper functions — verdict-cutoff boundaries at score 55/75, the
      stop/TP ATR formula (1.5x/3.0x), and morning-scan filtering end-to-end
@@ -1207,12 +1344,12 @@ successfully, found nothing" apart from "didn't run."
      identified. A regression test proves the new try/except: one symbol's
      `full_analysis()` (or fetch) raising still lets every other symbol in
      the same cycle alert normally.
-   - **PR 0b — pin `requirements.txt` to the production-installed versions.**
-     No code change: closes the gap flagged in `docs/CURRENT_ALERT_LOGIC.md`
-     §7/§8, where `ta`, `pandas`, `numpy`, `yfinance`, `python-telegram-bot`
-     currently have zero version pins.
-   - **PR 0c — the isolation test for the NEW code, independent of 0a/0b.**
-     The new system's own modules (trigger job, outcome module, logging)
+   - **PR 0b — pin `requirements.txt` to the production-installed versions.
+     MERGED — DONE.** No code change: closes the gap flagged in
+     `docs/CURRENT_ALERT_LOGIC.md` §7/§8, where `ta`, `pandas`, `numpy`,
+     `yfinance`, `python-telegram-bot` currently have zero version pins.
+   - **PR 0c — the isolation test for the NEW code, independent of 0a/0b.
+     Remaining — not yet started.** The new system's own modules (trigger job, outcome module, logging)
      must never import from or call into `agent/core.py`'s internals
      (`_alerted_this_session`, `was_alerted_today()`, the
      `schedule`/`asyncio.run()` loop) or share its dedup/cooldown state.
@@ -1223,7 +1360,17 @@ successfully, found nothing" apart from "didn't run."
 2. Data validation + trend/eligibility filter (§3-4).
 3. Setup definition + trigger/stop/target math (§5-8).
 4. Logging tables — candidates (with reason codes) + outcomes (§12).
-5. Replay harness (§13).
+5. Replay harness (§13), gated through three sequential milestones, each a
+   hard gate before the next:
+   a. **Outcome-blind feasibility count** (§8/§13) — `COUNT` fired setups
+      per calendar year for V1-V4, no returns or R-multiples computed yet.
+   b. **Freeze the pre-registration file and commit it to git** (§13) — the
+      exact decision rule, V1-V4 definitions, the 100/30/3 thresholds, the
+      costs assumption, the baseline's pass rule, the metric, and the
+      bootstrap procedure, locked in version control before any outcome is
+      looked at.
+   c. **Only then**: the first full replay run that actually computes
+      returns/R-multiples.
 6. **Only then**: messaging (bilingual, both formats, §11) and
    forward-shadow wiring.
 
@@ -1260,10 +1407,55 @@ caution, applied here to deployment timing instead of DB writes.
    live call is still unverified and should be confirmed before the
    messaging PR implements it.
 7. The exact name/signature of the new helpers this spec requires —
-   `find_confirmed_swing_points()` (§5) and
+   `find_confirmed_swing_highs()` (§5) and
    `get_multiple_prices_with_date()` (§6) — are described here by required
    behavior, not as finished code; their actual implementation and tests are
-   out of scope for this document (§14, PR 2/3).
+   out of scope for this document (§14, rollout steps 2-3 — not "PR 2/3": only
+   step 1 is split into named sub-PRs 0a/0b/0c; steps 2+ are plain rollout
+   phases, not separately designated PRs).
+8. **Scan timing slot** (§3/§15 agreement): 03:00 IL is proposed specifically
+   to avoid contention with the 01:30 IL composite job
+   (`scripts/log_composite_signals.py`), not because of any dependency on the
+   02:30 IL watchlist evaluation's output. Before fixing 03:00 as the actual
+   slot, check that job's typical run duration in
+   `logs/watchlist_evaluation_task.log` to confirm it doesn't itself run long
+   enough to still collide with 03:00.
+
+**Three items to verify before coding (not yet confirmed from the repository
+alone):**
+
+- **Where `security_type` actually lives.** It is **both** a stored column
+  (`db/database.py:144`, `watchlist.security_type TEXT DEFAULT 'stock'`,
+  added in the v2 migration documented at `db/database.py:77`) **and** a
+  value recomputed per-row on demand via `classify_security_type()`
+  (`analyzers/eligibility.py:30-38`) whenever the stored value is missing —
+  the existing fallback pattern is `row["security_type"] or
+  classify_security_type(sym)` (`services/watchlist_evaluator.py:1041`).
+  §2's universe query must decide, and state explicitly, whether it trusts
+  the stored column as-is or re-derives it per row the same way
+  `watchlist_evaluator.py` does — a stale stored value (e.g. a symbol
+  reclassified after the column was last written) would otherwise silently
+  diverge between this spec's universe and the existing evaluator's.
+- **`auto_adjust=True` and ex-dividend price shifts.** Every `yfinance` call
+  this spec relies on indirectly (`data/fetcher.py:46,65,117`,
+  `data/market_data_validator.py:410,465`) fetches with `auto_adjust=True`,
+  meaning stored price levels (and therefore `SH`, `SL`, stop, target, and
+  ATR) are in **adjusted-price units**. If an ex-dividend date falls inside a
+  pending setup's validity window (§6) or its 30-session outcome-tracking
+  window (§12), previously-computed levels for that symbol shift slightly
+  (adjusted prices are retroactively rebased on each new ex-div event).
+  **Decision: accept this, log it, treat as low priority** — the shift is
+  typically a few cents to low single-digit percent for ordinary dividend
+  payers and does not invalidate the setup, but it should be logged
+  (symbol + ex-div date + affected setup) rather than silently ignored, so a
+  future investigation into an unexpected outcome can rule it out or in.
+- **The exact helper names**, restated here for a single point of reference:
+  `find_confirmed_swing_highs(df, lookback=50)` (§5, swing-high detection
+  only — see above), `get_multiple_prices_with_date(symbols)` (§6, live
+  fetch plus bar date), and the new outcome module's entry point (§12,
+  name not yet chosen — parity-tested against `compute_outcome()`,
+  `scripts/populate_outcomes.py:86-96`). None of the three has an
+  implementation yet; this document specifies required behavior only.
 
 **Already settled** (listed here for completeness, not open): weekly
 alignment deferred to v2; market regime is a hard veto, logged on every
