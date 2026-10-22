@@ -118,7 +118,13 @@ def define_setup(
     # Step 1a: df staleness -- the last bar must actually BE the scan
     # date (exact equality, same convention as §3's data validation),
     # not merely the latest bar <= scan_date that happened to exist.
-    if _last_bar_date(df) != scan_date:
+    # Checked via `.empty` first: truncate_to_date() returns an empty
+    # frame when scan_date is earlier than every row df has (e.g. a
+    # newly-listed symbol, or a caller passing a scan_date outside the
+    # frame's history) -- _last_bar_date() would otherwise raise
+    # IndexError on `df.index[-1]`, breaking this function's own
+    # "never raises, always a Rejection" contract.
+    if df.empty or _last_bar_date(df) != scan_date:
         return Rejection(DATA_NOT_FINAL, "UNKNOWN", scan_date)
 
     # Step 1b: window-finiteness guard, before any swing/stop logic.
@@ -130,12 +136,14 @@ def define_setup(
     # Step 2: regime -- computed and attached regardless of which check,
     # if any, ultimately rejects the candidate (§9: "recorded on every
     # candidate... including ones that failed for other reasons first").
-    # A stale SPY frame (last bar isn't actually the scan date) does NOT
-    # reject outright the way a stale df does (step 1a) -- it just forces
-    # regime="UNKNOWN", which the existing regime veto (step 12) already
-    # treats as a reject, same fail-safe direction as every other
-    # missing/short/NaN SPY case.
-    if _last_bar_date(spy_df) != scan_date:
+    # A stale or empty SPY frame (last bar isn't actually the scan date,
+    # or there are no rows at all after truncation -- same empty-frame
+    # case as step 1a, guarded here the same way to avoid _last_bar_date()
+    # raising IndexError) does NOT reject outright the way a stale/empty
+    # df does (step 1a) -- it just forces regime="UNKNOWN", which the
+    # existing regime veto (step 12) already treats as a reject, same
+    # fail-safe direction as every other missing/short/NaN SPY case.
+    if spy_df.empty or _last_bar_date(spy_df) != scan_date:
         regime = "UNKNOWN"
     else:
         regime = _compute_regime(spy_df)

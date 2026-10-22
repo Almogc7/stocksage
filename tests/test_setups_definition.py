@@ -153,6 +153,39 @@ class TestStaleness(unittest.TestCase):
         self.assertEqual(result.reason_code, REGIME_VETO)
         self.assertEqual(result.regime, "UNKNOWN")
 
+    def test_scan_date_before_all_df_history_rejects_not_raises(self):
+        """scan_date earlier than every row df has (e.g. a newly-listed
+        symbol, or a caller bug) leaves truncate_to_date() returning an
+        EMPTY frame -- must reject with DATA_NOT_FINAL, never raise
+        IndexError trying to read an empty frame's last row."""
+        close = _golden_close()
+        df = _frame_from_close(close)
+        spy = _bull_spy(len(close), index=df.index)
+
+        result = define_setup(df, datetime.date(2020, 1, 1), spy)
+
+        self.assertIsInstance(result, Rejection)
+        self.assertEqual(result.reason_code, DATA_NOT_FINAL)
+        self.assertEqual(result.regime, "UNKNOWN")
+
+    def test_spy_df_entirely_after_scan_date_degrades_regime_not_raises(self):
+        """spy_df's earliest row is already after scan_date, so it's
+        EMPTY after truncation -- same empty-frame case as df above, but
+        must only degrade regime to "UNKNOWN" (not an immediate reject),
+        consistent with every other spy-data-problem case."""
+        close = _golden_close()
+        df = _frame_from_close(close)
+        scan_date = df.index[-1].date()
+        late_spy = _bull_spy(
+            5, index=pd.bdate_range(start=df.index[-1] + pd.Timedelta(days=1), periods=5)
+        )
+
+        result = define_setup(df, scan_date, late_spy)
+
+        self.assertIsInstance(result, Rejection)
+        self.assertEqual(result.reason_code, REGIME_VETO)
+        self.assertEqual(result.regime, "UNKNOWN")
+
     def test_tz_aware_indexes_are_not_spuriously_flagged_stale(self):
         """Both df and spy_df have tz-aware indexes whose dates DO match
         scan_date -- must accept normally, not false-positive on
