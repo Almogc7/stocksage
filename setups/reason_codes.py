@@ -40,3 +40,18 @@ NO_RESISTANCE = "NO_RESISTANCE"  # §8, Option B
 RR_BELOW_3 = "RR_BELOW_3"
 EXTENSION_VETO = "EXTENSION_VETO"  # §9
 REGIME_VETO = "REGIME_VETO"  # §9
+
+# Outcome simulation (§6, §12) -- fill/trigger/outcome statuses and events,
+# produced by setups/outcomes.py.
+INVALIDATED_BEFORE_FILL = "INVALIDATED_BEFORE_FILL"  # §6
+CHASE_RR_BELOW_3 = "CHASE_RR_BELOW_3"  # §6, post-fill recompute (distinct from RR_BELOW_3)
+EXPIRED_UNFILLED = "EXPIRED_UNFILLED"  # §6, validity window elapsed, never crossed trigger
+FILLED_STOPPED_SAME_DAY = "FILLED_STOPPED_SAME_DAY"  # §6, event code, included in every sample
+DATA_GAP = "DATA_GAP"  # §12, excluded, counted separately
+OPEN_AT_END = "OPEN_AT_END"  # §12, excluded, counted separately
+
+# first_barrier_hit enum (§12) -- mirrors alert_outcomes' CHECK-constraint
+# convention (db/database.py:350-364).
+BARRIER_STOP = "stop"
+BARRIER_TARGET = "target"
+BARRIER_TIMEOUT_30 = "timeout_30"
