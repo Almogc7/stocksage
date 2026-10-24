@@ -181,6 +181,145 @@ class TestStatePersistence(unittest.TestCase):
         self.assertEqual(status['category'], 'Financials')
         self.assertEqual(db.get_symbol_categories('CCC'), ['Financials'])
 
+class TestAddToWatchlistCanonicalizeOnWrite(unittest.TestCase):
+    """PR A.2: add_to_watchlist() must never overwrite an existing stored
+    category spelling with the other spelling of the SAME category --
+    config.WATCHLIST's keys stay Hebrew until a later PR, so without
+    this, every /add (or dashboard add-UI) call on an already-migrated
+    symbol would silently re-Hebraize it."""
+
+    def _tmp(self):
+        f = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        f.close()
+        return f.name
+
+    def test_new_symbol_keeps_the_given_spelling(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({})
+        db.add_to_watchlist('XOM', 'Financials')
+        status = db.get_symbol_status('XOM')
+        self.assertEqual(status['category'], 'Financials')
+        self.assertEqual(db.get_symbol_categories('XOM'), ['Financials'])
+
+    def test_existing_symbol_hebrew_seed_english_call_keeps_hebrew(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'פיננסים': ['JPM']})
+        db.add_to_watchlist('JPM', 'Financials')
+        status = db.get_symbol_status('JPM')
+        self.assertEqual(status['category'], 'פיננסים')
+        self.assertEqual(db.get_symbol_categories('JPM'), ['פיננסים'])
+
+    def test_existing_symbol_english_seed_hebrew_call_keeps_english(self):
+        """Synthetic "already migrated" fixture: watchlist.category is
+        directly set to the English spelling (simulating a world after
+        PR B has run), then called with the Hebrew spelling."""
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'פיננסים': ['GS']})
+        with db._connect() as conn:
+            conn.execute("UPDATE watchlist SET category = 'Financials' WHERE symbol = 'GS'")
+            conn.execute("DELETE FROM symbol_categories WHERE symbol = 'GS'")
+            conn.execute("INSERT INTO symbol_categories (symbol, category) VALUES ('GS', 'Financials')")
+        db.add_to_watchlist('GS', 'פיננסים')
+        status = db.get_symbol_status('GS')
+        self.assertEqual(status['category'], 'Financials')
+        self.assertEqual(db.get_symbol_categories('GS'), ['Financials'])
+
+    def test_genuinely_different_category_moves_the_symbol(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'AI & Semiconductors': ['MSTR']})
+        db.add_to_watchlist('MSTR', 'Financials')
+        status = db.get_symbol_status('MSTR')
+        self.assertEqual(status['category'], 'Financials')
+
+    def test_secondary_tag_other_spelling_keeps_stored_spelling_no_duplicate(self):
+        """Primary category A, a SECONDARY symbol_categories tag under
+        one spelling of category B -- calling add_to_watchlist with the
+        OTHER spelling of B must keep the stored tag's spelling and
+        create no duplicate-spelling row."""
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'AI & Semiconductors': ['NVDA'], 'מגה טק': ['NVDA']})
+        db.add_to_watchlist('NVDA', 'Mega Cap Tech')
+        cats = db.get_symbol_categories('NVDA')
+        self.assertIn('מגה טק', cats)
+        self.assertNotIn('Mega Cap Tech', cats)
+        self.assertEqual(cats.count('מגה טק'), 1)
+        # Primary category moves to the (existing-spelling) match, per
+        # the preference-order rule: watchlist.category had no match,
+        # so a symbol_categories tag match is used instead.
+        self.assertEqual(db.get_symbol_status('NVDA')['category'], 'מגה טק')
+
+    def test_primary_category_with_no_symbol_categories_row(self):
+        """Data-drift fixture: a watchlist row exists but has NO
+        corresponding symbol_categories row at all (as if seeded by a
+        direct SQL edit, bypassing add_to_watchlist/_seed_symbol).
+        Calling under the other spelling must keep the stored primary
+        spelling and backfill exactly one symbol_categories row under
+        THAT spelling, not two."""
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({})
+        with db._connect() as conn:
+            conn.execute(
+                "INSERT INTO watchlist (symbol, category, enabled) VALUES ('C', 'פיננסים', 1)"
+            )
+        self.assertEqual(db.get_symbol_categories('C'), [])  # confirm the drift fixture
+        db.add_to_watchlist('C', 'Financials')
+        status = db.get_symbol_status('C')
+        self.assertEqual(status['category'], 'פיננסים')
+        self.assertEqual(db.get_symbol_categories('C'), ['פיננסים'])
+
+    def test_symbol_already_under_both_spellings_is_not_touched_into_a_third_state(self):
+        """A symbol that already has BOTH spellings in
+        symbol_categories (as CCC could, pre-PR-B) must not be touched
+        into a third state -- the existing duplicate is left exactly as
+        is; collapsing it is PR B's job, not this function's."""
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'פיננסים': ['SYM']})
+        with db._connect() as conn:
+            conn.execute(
+                "INSERT INTO symbol_categories (symbol, category) VALUES ('SYM', 'Financials')"
+            )
+        db.add_to_watchlist('SYM', 'Financials')
+        status = db.get_symbol_status('SYM')
+        self.assertEqual(status['category'], 'פיננסים')  # primary wins the preference order
+        cats = sorted(db.get_symbol_categories('SYM'))
+        self.assertEqual(cats, ['Financials', 'פיננסים'])  # unchanged dual state, no third spelling
+
+    def test_dashboard_style_call_path(self):
+        """dashboard.py's add-UI calls add_to_watchlist directly with a
+        value taken from config.CATEGORIES (st.selectbox(options=
+        CATEGORIES)) -- same call shape, no Telegram involved. Proves
+        the fix works identically regardless of caller."""
+        import config
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'פיננסים': ['BAC']})
+        dashboard_selected_category = next(
+            c for c in config.CATEGORIES if config.canonical_category(c) == 'Financials'
+        )
+        db.add_to_watchlist('BAC', dashboard_selected_category)
+        status = db.get_symbol_status('BAC')
+        self.assertEqual(status['category'], 'פיננסים')
+        self.assertEqual(db.get_symbol_categories('BAC'), ['פיננסים'])
+
+
+class TestRestartAndReclassification(unittest.TestCase):
+    """Restart/reclassification-survival tests, split out from
+    TestStatePersistence above purely by insertion point (PR A.2's new
+    TestAddToWatchlistCanonicalizeOnWrite class was added between them) --
+    no behavioral change to any test below."""
+
+    def _tmp(self):
+        f = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        f.close()
+        return f.name
+
     def test_restart_does_not_reset_promoted_symbol_to_monitor(self):
         """A MONITOR symbol dynamically promoted to ACTIVE must survive a restart."""
         path = self._tmp()

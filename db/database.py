@@ -546,9 +546,40 @@ def add_to_watchlist(symbol: str, category: str) -> None:
     eligibility engine can re-evaluate the symbol on the next cycle —
     unless the symbol is pinned, in which case its state is preserved
     (/add must not silently knock a pinned symbol out of ACTIVE).
+
+    Canonicalize-on-write: if this symbol already has a stored spelling
+    for the SAME category -- its primary watchlist.category, or any
+    symbol_categories tag -- that exact spelling is reused instead of
+    writing a second, duplicate-meaning one. config.WATCHLIST's keys
+    stay Hebrew until a later PR, so without this, every /add call on an
+    already-migrated symbol would silently re-Hebraize it.
     """
     sym = symbol.upper()
     with _connect() as conn:
+        # Preference order when several stored spellings canonically
+        # match (e.g. a symbol that already has both spellings in
+        # symbol_categories): the current watchlist.category first, then
+        # the first match among symbol_categories tags in sorted order
+        # -- deterministic regardless of row insertion order.
+        row = conn.execute(
+            "SELECT category FROM watchlist WHERE symbol = ?", (sym,)
+        ).fetchone()
+        current_primary = row["category"] if row is not None else None
+
+        tags = sorted(
+            r["category"] for r in conn.execute(
+                "SELECT category FROM symbol_categories WHERE symbol = ?", (sym,)
+            ).fetchall()
+        )
+
+        target = canonical_category(category)
+        if current_primary is not None and canonical_category(current_primary) == target:
+            category = current_primary
+        else:
+            match = next((t for t in tags if canonical_category(t) == target), None)
+            if match is not None:
+                category = match
+
         conn.execute(
             "INSERT INTO watchlist (symbol, category, enabled, wl_state, wl_classified)"
             " VALUES (?, ?, 1, 'MONITOR', 1)"
