@@ -309,6 +309,217 @@ class TestAddToWatchlistCanonicalizeOnWrite(unittest.TestCase):
         self.assertEqual(db.get_symbol_categories('BAC'), ['פיננסים'])
 
 
+class TestSeedSymbolCanonicalizeOnWrite(unittest.TestCase):
+    """PR A.3: _seed_symbol() (the populate_from_config() path, run on
+    every bot restart) must resolve which spelling to tag in
+    symbol_categories the same way add_to_watchlist() does, so a restart
+    can never re-create a stale-spelled row for a category a symbol is
+    already tagged under -- see TestAddToWatchlistCanonicalizeOnWrite
+    above for the /add-path equivalent of these scenarios."""
+
+    def _tmp(self):
+        f = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        f.close()
+        return f.name
+
+    def _counts(self, db):
+        with db._connect() as conn:
+            w = conn.execute("SELECT COUNT(*) c FROM watchlist").fetchone()['c']
+            t = conn.execute("SELECT COUNT(*) c FROM symbol_categories").fetchone()['c']
+        return w, t
+
+    def test_brand_new_symbol_seeds_with_incoming_spelling(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({})
+        db.populate_from_config({'Financials': ['XOM']})
+        status = db.get_symbol_status('XOM')
+        self.assertEqual(status['category'], 'Financials')
+        self.assertEqual(db.get_symbol_categories('XOM'), ['Financials'])
+
+    def test_seed_resolves_to_existing_primary_spelling_when_canonical_match(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'Financials': ['JPM']})
+        db.populate_from_config({'פיננסים': ['JPM']})
+        status = db.get_symbol_status('JPM')
+        self.assertEqual(status['category'], 'Financials')
+        self.assertEqual(db.get_symbol_categories('JPM'), ['Financials'])
+
+    def test_seed_resolves_to_existing_tag_spelling_when_only_tag_matches(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'AI & Semiconductors': ['NVDA']})
+        db.add_category_tag('NVDA', 'Mega Cap Tech')
+        db.populate_from_config({'מגה טק': ['NVDA']})
+        cats = db.get_symbol_categories('NVDA')
+        self.assertIn('Mega Cap Tech', cats)
+        self.assertNotIn('מגה טק', cats)
+        self.assertEqual(cats.count('Mega Cap Tech'), 1)
+        self.assertEqual(db.get_symbol_status('NVDA')['category'], 'AI & Semiconductors')
+
+    def test_seed_backfills_missing_tag_using_primary_spelling(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({})
+        with db._connect() as conn:
+            conn.execute(
+                "INSERT INTO watchlist (symbol, category, enabled) VALUES ('C', 'Financials', 1)"
+            )
+        self.assertEqual(db.get_symbol_categories('C'), [])  # confirm the drift fixture
+        db.populate_from_config({'פיננסים': ['C']})
+        status = db.get_symbol_status('C')
+        self.assertEqual(status['category'], 'Financials')
+        self.assertEqual(db.get_symbol_categories('C'), ['Financials'])
+
+    def test_seed_keeps_two_distinct_tags_for_symbol_in_two_categories(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({})
+        db.populate_from_config({'AI & Semiconductors': ['NVDA'], 'Mega Cap Tech': ['NVDA']})
+        cats = sorted(db.get_symbol_categories('NVDA'))
+        self.assertEqual(cats, ['AI & Semiconductors', 'Mega Cap Tech'])
+
+    def test_seed_removed_symbol_stays_removed(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'AI & Semiconductors': ['NVDA']})
+        db.remove_from_watchlist('NVDA')
+        db.populate_from_config({'AI & Semiconductors': ['NVDA']})
+        status = db.get_symbol_status('NVDA')
+        self.assertEqual(status['enabled'], 0)
+        self.assertEqual(db.get_symbol_categories('NVDA'), ['AI & Semiconductors'])
+
+    def test_reseeding_twice_is_idempotent(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({})
+        wl = {'AI & Semiconductors': ['NVDA'], 'ETFs': ['SPY']}
+        db.populate_from_config(wl)
+        counts_1 = self._counts(db)
+        db.populate_from_config(wl)
+        counts_2 = self._counts(db)
+        self.assertEqual(counts_1, counts_2)
+
+    def test_full_watchlist_reseed_after_category_migration_is_clean(self):
+        """Whole-config integration test against the REAL config.WATCHLIST:
+        seed + classify first (today's real startup sequence -- this is
+        what puts CCC under the live, still-Hebrew "Financials" spelling
+        via run_initial_classification's own CCC special case, and sets
+        wl_classified=1 for every row), THEN simulate a future migration
+        of all 12 Hebrew category names to English (plain SQL, as a
+        one-off migration script would -- this now also covers CCC's
+        freshly-classified Financials row), THEN simulate two more
+        restarts (populate_from_config + run_initial_classification, the
+        exact pair run_bot() calls on every process start -- the second
+        call is a true no-op since wl_classified is already 1 everywhere)
+        and assert no Hebrew spelling comes back and nothing grows."""
+        import config
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({})
+        db.populate_from_config(config.WATCHLIST)
+        db.run_initial_classification(config.WATCHLIST)
+
+        with db._connect() as conn:
+            for hebrew, english in config.HEBREW_TO_ENGLISH_CATEGORY.items():
+                conn.execute(
+                    "UPDATE watchlist SET category = ? WHERE category = ?",
+                    (english, hebrew),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO symbol_categories (symbol, category) "
+                    "SELECT symbol, ? FROM symbol_categories WHERE category = ?",
+                    (english, hebrew),
+                )
+                conn.execute(
+                    "DELETE FROM symbol_categories WHERE category = ?", (hebrew,)
+                )
+
+        db.populate_from_config(config.WATCHLIST)
+        db.run_initial_classification(config.WATCHLIST)
+        db.populate_from_config(config.WATCHLIST)
+        db.run_initial_classification(config.WATCHLIST)
+
+        # The invariant _seed_symbol's fix actually guarantees: no symbol
+        # ever carries two symbol_categories tags that canonically
+        # resolve to the SAME category (that would be a duplicate
+        # Hebrew/English spelling of one category -- exactly what PR A.3
+        # prevents).
+        with db._connect() as conn:
+            rows = conn.execute("SELECT symbol, category FROM symbol_categories").fetchall()
+        by_symbol = {}
+        for r in rows:
+            by_symbol.setdefault(r['symbol'], []).append(r['category'])
+        for sym, cats in by_symbol.items():
+            canon = [config.canonical_category(c) for c in cats]
+            self.assertEqual(
+                len(canon), len(set(canon)),
+                f"{sym} has duplicate-spelling tags for the same category: {cats}",
+            )
+
+        # NOTE on CCC: config.WATCHLIST still lists CCC under the Hebrew
+        # "ענן ותוכנה" (Cloud & Software) key, while
+        # run_initial_classification's CCC special case moves it to
+        # Financials on first classification (deleting the Cloud &
+        # Software tag). Because wl_classified then gates CCC out of
+        # run_initial_classification on every later call, but
+        # populate_from_config has no such gate -- it reseeds every
+        # WATCHLIST membership on every restart regardless -- CCC's
+        # Hebrew Cloud & Software tag is silently RE-ADDED by
+        # populate_from_config on the very next restart after
+        # classification, and never removed again. This reproduces
+        # identically on pre-fix _seed_symbol (plain INSERT OR IGNORE
+        # also re-inserts it, since the exact (CCC, 'ענן ותוכנה') row was
+        # deleted and no longer exists to no-op against) -- it is a
+        # separate, pre-existing populate_from_config-vs-
+        # run_initial_classification interaction, not a duplicate-
+        # spelling regression, and out of scope for a fix confined to
+        # _seed_symbol. Flagged here rather than hidden: it means a
+        # literal "zero Hebrew rows anywhere" or "row counts never grow"
+        # assertion does not hold for CCC specifically, even after this
+        # fix.
+        ccc_cats = db.get_symbol_categories('CCC')
+        self.assertIn('Financials', ccc_cats)
+        self.assertNotIn('פיננסים', ccc_cats)
+        self.assertEqual(db.get_symbol_status('CCC')['category'], 'Financials')
+
+        # Every OTHER symbol: no Hebrew spelling reappears for a category
+        # it was already migrated to English under.
+        hebrew_names = set(config.HEBREW_TO_ENGLISH_CATEGORY.keys())
+        for sym, cats in by_symbol.items():
+            if sym == 'CCC':
+                continue  # see NOTE above
+            stray = hebrew_names.intersection(cats)
+            self.assertFalse(stray, f"{sym} has stray Hebrew tags: {stray}")
+        with db._connect() as conn:
+            placeholders = ",".join("?" * len(hebrew_names))
+            stray_watchlist = conn.execute(
+                f"SELECT COUNT(*) c FROM watchlist WHERE category IN ({placeholders}) "
+                "AND symbol != 'CCC'",
+                tuple(hebrew_names),
+            ).fetchone()['c']
+        self.assertEqual(stray_watchlist, 0)
+
+        # find at least one symbol genuinely listed under two WATCHLIST
+        # categories (config.WATCHLIST has a handful per the
+        # entries-vs-unique-symbols count) and confirm it kept exactly
+        # that many distinct, English-only tags.
+        seen = {}
+        for category, symbols in config.WATCHLIST.items():
+            for sym in symbols:
+                seen.setdefault(sym, set()).add(config.canonical_category(category))
+        dual_symbol, dual_cats = next(
+            ((sym, cats) for sym, cats in seen.items() if len(cats) > 1), (None, None)
+        )
+        self.assertIsNotNone(dual_symbol, "expected at least one symbol under two WATCHLIST categories")
+        dual_tags = db.get_symbol_categories(dual_symbol)
+        self.assertEqual(len(dual_tags), len(dual_cats))
+        self.assertEqual({config.canonical_category(t) for t in dual_tags}, dual_cats)
+        for tag in dual_tags:
+            self.assertNotIn(tag, hebrew_names)
+
+
 class TestRestartAndReclassification(unittest.TestCase):
     """Restart/reclassification-survival tests, split out from
     TestStatePersistence above purely by insertion point (PR A.2's new
