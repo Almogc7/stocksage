@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -101,19 +101,33 @@ def define_setup(
     spy_df: pd.DataFrame,
     params: SetupParams = V1_PARAMS,
 ) -> SetupDefinition | Rejection:
-    # Step 0: normalize + validate shape for BOTH frames -- a missing
-    # column on either one returns a Rejection, never raises.
+    if isinstance(scan_date, datetime):
+        scan_date = scan_date.date()
+
+    # Step 0: not a DataFrame at all (None, or any other wrong type) --
+    # df is fatal (no data to work with at all); spy_df is NOT fatal, it
+    # only ever degrades regime to "UNKNOWN" (step 2) -- same posture as
+    # every other spy-data problem below, never an immediate reject.
+    if not isinstance(df, pd.DataFrame):
+        return Rejection(MISSING_OHLCV, "UNKNOWN", scan_date)
+    spy_valid = isinstance(spy_df, pd.DataFrame)
+
+    # Step 0b: normalize + validate shape for BOTH frames -- a missing
+    # column on either one returns a Rejection (df) or degrades regime
+    # to "UNKNOWN" (spy_df), never raises.
     df = normalize_frame(df)
     if missing_required_columns(df):
         return Rejection(MISSING_OHLCV, "UNKNOWN", scan_date)
-    spy_df = normalize_frame(spy_df)
-    if missing_required_columns(spy_df):
-        return Rejection(MISSING_OHLCV, "UNKNOWN", scan_date)
+    if spy_valid:
+        spy_df = normalize_frame(spy_df)
+        if missing_required_columns(spy_df):
+            spy_valid = False
 
     # Step 1: no-look-ahead truncation (§13a) -- applies to every
     # indicator this spec uses, not limited to swing levels.
     df = truncate_to_date(df, scan_date)
-    spy_df = truncate_to_date(spy_df, scan_date)
+    if spy_valid:
+        spy_df = truncate_to_date(spy_df, scan_date)
 
     # Step 1a: df staleness -- the last bar must actually BE the scan
     # date (exact equality, same convention as §3's data validation),
@@ -136,17 +150,18 @@ def define_setup(
     # Step 2: regime -- computed and attached regardless of which check,
     # if any, ultimately rejects the candidate (§9: "recorded on every
     # candidate... including ones that failed for other reasons first").
-    # A stale or empty SPY frame (last bar isn't actually the scan date,
-    # or there are no rows at all after truncation -- same empty-frame
-    # case as step 1a, guarded here the same way to avoid _last_bar_date()
-    # raising IndexError) does NOT reject outright the way a stale/empty
-    # df does (step 1a) -- it just forces regime="UNKNOWN", which the
-    # existing regime veto (step 12) already treats as a reject, same
-    # fail-safe direction as every other missing/short/NaN SPY case.
-    if spy_df.empty or _last_bar_date(spy_df) != scan_date:
-        regime = "UNKNOWN"
-    else:
+    # A missing (None/wrong-type, step 0), stale, or empty SPY frame
+    # (last bar isn't actually the scan date, or there are no rows at
+    # all after truncation -- same empty-frame case as step 1a, guarded
+    # here the same way to avoid _last_bar_date() raising IndexError)
+    # does NOT reject outright the way a missing/stale/empty df does
+    # (step 1a) -- it just forces regime="UNKNOWN", which the existing
+    # regime veto (step 12) already treats as a reject, same fail-safe
+    # direction as every other missing/short/NaN SPY case.
+    if spy_valid and not spy_df.empty and _last_bar_date(spy_df) == scan_date:
         regime = _compute_regime(spy_df)
+    else:
+        regime = "UNKNOWN"
 
     # Step 3: SH = the most recent confirmed swing high by date.
     confirmed_highs = find_confirmed_swing_highs(df, lookback=params.swing_lookback_bars)
@@ -185,7 +200,7 @@ def define_setup(
     # every other MISSING_OHLCV guard in this function.
     try:
         atr = float(calc_atr(df)["atr"])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, ZeroDivisionError):
         return Rejection(MISSING_OHLCV, regime, scan_date)
     if not math.isfinite(atr) or atr <= 0:
         return Rejection(MISSING_OHLCV, regime, scan_date)

@@ -17,6 +17,14 @@ def truncate_to_date(df: pd.DataFrame, scan_date: date) -> pd.DataFrame:
     """
     if isinstance(scan_date, datetime):
         scan_date = scan_date.date()
+    # Empty input, or a non-DatetimeIndex (RangeIndex, string labels, ...):
+    # there is nothing date-comparable to truncate against. Returning the
+    # frame as-is (never raising) pushes the actual "this isn't a usable
+    # frame" determination to the caller's own validation/staleness
+    # checks, which are built to report it as a Rejection/Result instead
+    # of letting a dtype-mismatched comparison raise here.
+    if df.empty or not isinstance(df.index, pd.DatetimeIndex):
+        return df.copy()
     index_dates = pd.Series(df.index).apply(
         lambda ts: ts.date() if hasattr(ts, "date") else ts
     )

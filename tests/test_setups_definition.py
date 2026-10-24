@@ -460,7 +460,11 @@ class TestGuards(unittest.TestCase):
         self.assertEqual(result.reason_code, MISSING_OHLCV)
         self.assertEqual(result.regime, "UNKNOWN")
 
-    def test_missing_column_on_spy_df_rejects_not_raises(self):
+    def test_missing_column_on_spy_df_degrades_regime_not_raises(self):
+        """A missing spy_df column is a SPY-data problem, same family as
+        spy_df=None/empty/stale -- it degrades regime to "UNKNOWN"
+        (which the regime veto then rejects) rather than hard-rejecting
+        immediately with MISSING_OHLCV the way a missing DF column does."""
         df = _frame_from_close(_golden_close())
         spy = _bull_spy(len(df), index=df.index).drop(columns=["high"])
         scan_date = df.index[-1].date()
@@ -468,7 +472,6 @@ class TestGuards(unittest.TestCase):
         result = define_setup(df, scan_date, spy)
 
         self.assertIsInstance(result, Rejection)
-        self.assertEqual(result.reason_code, MISSING_OHLCV)
         self.assertEqual(result.regime, "UNKNOWN")
 
 
