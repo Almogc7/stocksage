@@ -20,6 +20,7 @@ from config import (
     AUTHORIZED_CHAT_IDS,
     CATEGORIES, TELEGRAM_ALLOW_WATCHLIST_APPLY,
     WATCHLIST, WATCHLIST_CHANGES_DEFAULT_LIMIT, WATCHLIST_CHANGES_MAX_LIMIT,
+    canonical_category,
 )
 from data.fetcher import get_current_price, get_historical, is_market_open
 from db.database import (
@@ -827,11 +828,22 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     symbol = context.args[0].upper()
-    category = " ".join(context.args[1:])
+    category_input = " ".join(context.args[1:]).strip()
 
-    if category not in CATEGORIES:
-        cats = "\n".join(f"  • {c}" for c in CATEGORIES)
-        await _send(update, f"❌ {s['unknown_category']}: {category}\n\n{s['available_categories']}:\n{cats}")
+    # Matches either spelling of a known category (case-insensitive,
+    # surrounding whitespace already stripped above) and resolves to the
+    # actual CATEGORIES/WATCHLIST key -- never the raw typed string -- so
+    # a symbol added under either spelling is stored under the exact same
+    # category string its existing peers already use.
+    category = next(
+        (c for c in CATEGORIES
+         if canonical_category(c).casefold() == canonical_category(category_input).casefold()),
+        None,
+    )
+
+    if category is None:
+        cats = "\n".join(f"  • {canonical_category(c)}" for c in CATEGORIES)
+        await _send(update, f"❌ {s['unknown_category']}: {category_input}\n\n{s['available_categories']}:\n{cats}")
         return
 
     add_to_watchlist(symbol, category)

@@ -127,6 +127,60 @@ class TestStatePersistence(unittest.TestCase):
         status = db.get_symbol_status('NVDA')
         self.assertEqual(status['wl_state'], 'USER_REMOVED')
 
+    def test_ccc_reclassified_to_live_financials_key(self):
+        """PR A (English category names): the CCC special case resolves
+        the live Financials spelling dynamically from config.WATCHLIST
+        (today still "פיננסים") -- never a hardcoded literal in
+        production code, so this test resolves the expected value the
+        same dynamic way rather than hardcoding it either."""
+        import config
+        expected_key = next(
+            k for k in config.WATCHLIST if config.canonical_category(k) == "Financials"
+        )
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'ענן ותוכנה': ['CCC']})  # seeded as cloud/software, same as the real bug it fixes
+        db.run_initial_classification({'ענן ותוכנה': ['CCC']})
+        status = db.get_symbol_status('CCC')
+        self.assertEqual(status['category'], expected_key)
+        self.assertEqual(db.get_symbol_categories('CCC'), [expected_key])
+
+    def test_ccc_repeated_classification_passes_create_no_duplicate_rows(self):
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'ענן ותוכנה': ['CCC']})
+        db.run_initial_classification({'ענן ותוכנה': ['CCC']})
+        # Force a second pass over the same, now-already-Financials row
+        # (simulating wl_classified being reset, e.g. by a future reseed)
+        # -- the skip-write guard must leave symbol_categories with
+        # exactly one row, never a duplicate.
+        with db._connect() as conn:
+            conn.execute("UPDATE watchlist SET wl_classified = 0 WHERE symbol = 'CCC'")
+        db.run_initial_classification({'ענן ותוכנה': ['CCC']})
+        self.assertEqual(db.get_symbol_categories('CCC'), ['פיננסים'])
+
+    def test_ccc_already_under_english_financials_spelling_is_left_untouched(self):
+        """A CCC row already stored under the ENGLISH "Financials"
+        spelling (simulating a later world where that's live, or a
+        manual edit) must be left completely untouched -- no UPDATE, no
+        DELETE+INSERT -- since it already canonicalizes to Financials."""
+        path = self._tmp()
+        db = _reload_db(path)
+        db.init_db({'ענן ותוכנה': ['CCC']})
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE watchlist SET category = 'Financials', wl_classified = 0"
+                " WHERE symbol = 'CCC'"
+            )
+            conn.execute("DELETE FROM symbol_categories WHERE symbol = 'CCC'")
+            conn.execute(
+                "INSERT INTO symbol_categories (symbol, category) VALUES ('CCC', 'Financials')"
+            )
+        db.run_initial_classification({'ענן ותוכנה': ['CCC']})
+        status = db.get_symbol_status('CCC')
+        self.assertEqual(status['category'], 'Financials')
+        self.assertEqual(db.get_symbol_categories('CCC'), ['Financials'])
+
     def test_restart_does_not_reset_promoted_symbol_to_monitor(self):
         """A MONITOR symbol dynamically promoted to ACTIVE must survive a restart."""
         path = self._tmp()

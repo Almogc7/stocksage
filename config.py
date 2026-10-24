@@ -569,7 +569,40 @@ REPLACEMENT_MARGIN: int = int(os.getenv("REPLACEMENT_MARGIN", "5"))
 ETF_ALERTS_ENABLED: bool = os.getenv("ETF_ALERTS_ENABLED", "false").lower() == "true"
 
 # Categories considered to be bank/financial sector (used for bank-cap enforcement)
-BANK_CATEGORIES: frozenset[str] = frozenset(["פיננסים"])
+BANK_CATEGORIES: frozenset[str] = frozenset(["Financials"])
+
+# English canonical name for every Hebrew (or mixed-script) WATCHLIST
+# category key. PR A (English category names, rollout step 1 of 3):
+# accepts both spellings everywhere a category is matched, without
+# renaming WATCHLIST's own keys yet -- see canonical_category() below.
+HEBREW_TO_ENGLISH_CATEGORY: dict[str, str] = {
+    "מדדים": "Indices",
+    "קריפטו": "Crypto",
+    "מגה טק": "Mega Cap Tech",
+    "ענן ותוכנה": "Cloud & Software",
+    "סייבר": "Cybersecurity",
+    "תשתיות Data Center": "Data Center Infrastructure",
+    "חלל": "Space & Defense",
+    "אנרגיה": "Energy",
+    "גרעין": "Nuclear",
+    "אנרגיה ירוקה": "Green Energy",
+    "פיננסים": "Financials",
+    "חומרי גלם": "Raw Materials",
+}
+
+
+def canonical_category(name):
+    """English canonical form for either spelling of a WATCHLIST
+    category. An already-English name (one of the three native-English
+    WATCHLIST keys, or any of the twelve English names above) passes
+    through unchanged. Non-string input (None, a number, ...) is also
+    returned unchanged rather than raising -- dict.get() on an
+    unhashable value (e.g. a list) would otherwise raise TypeError, and
+    this function should never itself be a reason something else
+    crashes."""
+    if not isinstance(name, str):
+        return name
+    return HEBREW_TO_ENGLISH_CATEGORY.get(name, name)
 
 # ─────────────────────────────────────────────
 #  Market Data Validation (Phase 3 — data/market_data_validator.py)

@@ -251,5 +251,66 @@ class TestCommandRegistration(unittest.TestCase):
         fake_app.run_polling.assert_called_once()
 
 
+class TestAddAcceptsEitherCategorySpelling(unittest.TestCase):
+    """PR A (English category names): cmd_add must match either spelling
+    of a known category (case-insensitive, surrounding whitespace
+    stripped) and store the resolved CATEGORIES/WATCHLIST key -- never
+    the raw typed string -- so a symbol added under either spelling ends
+    up filed under the exact same category string as its existing peers.
+    """
+
+    def setUp(self):
+        self.db = _reload_db(_tmp_db_path())
+        self.db.init_db({"פיננסים": ["JPM"]})  # an existing peer under the Hebrew key
+
+    def test_hebrew_category_name_still_works(self):
+        import bot.telegram_bot as tb
+        update = _make_update()
+        with patch("bot.telegram_bot.AUTHORIZED_CHAT_IDS", frozenset([AUTH_ID])):
+            _run(tb.cmd_add(update, _make_context(["GS", "פיננסים"])))
+        self.assertEqual(self.db.get_symbol_categories("GS"), ["פיננסים"])
+
+    def test_english_category_name_stores_the_same_key_as_existing_peers(self):
+        import bot.telegram_bot as tb
+        update = _make_update()
+        with patch("bot.telegram_bot.AUTHORIZED_CHAT_IDS", frozenset([AUTH_ID])):
+            _run(tb.cmd_add(update, _make_context(["MS", "Financials"])))
+        # Stored under the SAME string as the pre-existing "JPM" peer --
+        # not the raw typed English string.
+        self.assertEqual(self.db.get_symbol_categories("MS"), ["פיננסים"])
+        self.assertEqual(
+            self.db.get_symbol_categories("MS"), self.db.get_symbol_categories("JPM"),
+        )
+
+    def test_matching_is_case_insensitive_and_strips_surrounding_whitespace(self):
+        import bot.telegram_bot as tb
+        update = _make_update()
+        with patch("bot.telegram_bot.AUTHORIZED_CHAT_IDS", frozenset([AUTH_ID])):
+            _run(tb.cmd_add(update, _make_context(["C", "  financials  "])))
+        self.assertEqual(self.db.get_symbol_categories("C"), ["פיננסים"])
+
+    def test_multiword_english_category_through_real_argument_joining(self):
+        """Exercises " ".join(context.args[1:]) actually reconstructing a
+        multi-word category name from separate argv tokens -- not a
+        single-token category, which wouldn't catch a join-logic bug."""
+        import bot.telegram_bot as tb
+        self.db.init_db({"ענן ותוכנה": ["CRM"]})
+        update = _make_update()
+        with patch("bot.telegram_bot.AUTHORIZED_CHAT_IDS", frozenset([AUTH_ID])):
+            # context.args splits on whitespace: ["SNOW", "Cloud", "&", "Software"]
+            _run(tb.cmd_add(update, _make_context(["SNOW", "Cloud", "&", "Software"])))
+        self.assertEqual(self.db.get_symbol_categories("SNOW"), ["ענן ותוכנה"])
+
+    def test_unknown_category_warning_lists_english_names(self):
+        import bot.telegram_bot as tb
+        update = _make_update()
+        with patch("bot.telegram_bot.AUTHORIZED_CHAT_IDS", frozenset([AUTH_ID])):
+            _run(tb.cmd_add(update, _make_context(["XYZ", "NotARealCategory"])))
+        text = _sent_text(update)
+        self.assertIn("Financials", text)
+        self.assertNotIn("פיננסים", text)
+        self.assertIsNone(self.db.get_symbol_status("XYZ"))
+
+
 if __name__ == "__main__":
     unittest.main()

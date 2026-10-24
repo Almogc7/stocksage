@@ -67,6 +67,16 @@ class TestSetupUniverse(unittest.TestCase):
         self.assertNotIn("QQQ", result.included)
         self.assertEqual(result.excluded[0]["reason_code"], EXCLUDED_CATEGORY)
 
+    def test_excluded_category_indices_english_matches_hebrew(self):
+        """PR A (English category names): a row stored under the English
+        name "Indices" must be excluded identically to one stored under
+        "מדדים" -- same outcome as test_excluded_category_indices_hebrew
+        above, just the other spelling."""
+        self._insert("DIA", "Indices", "stock", "ACTIVE")
+        result = get_setup_universe(self.conn)
+        self.assertNotIn("DIA", result.included)
+        self.assertEqual(result.excluded[0]["reason_code"], EXCLUDED_CATEGORY)
+
     def test_excluded_security_type(self):
         self._insert("VOO", "Tech", "etf", "ACTIVE")
         result = get_setup_universe(self.conn)
