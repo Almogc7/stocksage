@@ -461,6 +461,21 @@ validation and §4's trend/eligibility filter:
      5-bar-fractal confirmation lag that still applies to `SH` (above).
      **Both the pullback-depth check (item 3) and the stop (§7) use this
      identical `SL` value** — there is no separate recomputation for either.
+
+     **Implemented exactly as: the search is never restricted to a
+     2-sessions-old-or-older subset.** `SL` is first found as the **global
+     minimum** low over *every* bar strictly after `SH` through the scan
+     date (ties broken by taking the **latest** occurrence, not the
+     earliest — a decision this document had left open). *Only then* is
+     that global minimum's own bar checked for the 2-session staleness
+     rule above. **If the true global minimum sits in the last 2 bars
+     (not yet confirmed-old), the setup is rejected outright — reason code
+     `PULLBACK_LOW_UNCONFIRMED` — never re-anchored to an older, higher
+     low that happens to be 2+ sessions old.** An earlier implementation
+     draft instead restricted the search itself to the 2-sessions-old-or-
+     older subset, which would have silently substituted that older,
+     non-minimal low as `SL` whenever the true low was still too recent —
+     this is the corrected, spec-faithful behavior.
    If either `SH` or `SL` cannot be identified (e.g., too few confirmed swing
    highs in the lookback window, or no bar exists after `SH` old enough to
    qualify as `SL`), no setup is produced for that symbol — logged with
@@ -801,10 +816,21 @@ attractive the target looks. (Reason code: `STOP_CAP_EXCEEDED`, §12.)
 §5's precise setup definition, the trigger price is itself `SH` (the
 confirmed swing high being broken out above) — so the target **cannot** also
 be "nearest resistance above entry" using the same value, which would
-collapse reward to zero by definition. **The target is the smallest value in
-`calc_swing_levels()`'s `swing_highs` list that is strictly greater than
-`SH`** — i.e., the next confirmed swing-high resistance level *beyond* the
-breakout point. (Pivot points are not used anywhere, per §5.)
+collapse reward to zero by definition. **The target is the smallest value
+strictly greater than `SH`, among the same confirmed-swing-high list
+`find_confirmed_swing_highs()` already produced to identify `SH` itself**
+— i.e., the next confirmed swing-high resistance level *beyond* the
+breakout point. **Implemented as a deliberate deviation from this
+section's originally-literal text**, which named `calc_swing_levels()`'s
+`swing_highs` list instead: both lists are built from the identical
+5-bar fractal rule over the identical window, so the *set* of prices is
+the same either way (per §5's parity note) — sourcing the target from
+`find_confirmed_swing_highs()` instead means `define_setup()` has exactly
+one fractal-detection dependency, not two, for what is conceptually one
+underlying computation. `calc_swing_levels()` is no longer a
+`define_setup()` dependency at all; it remains in use only by
+`find_confirmed_swing_highs()`'s own parity test. (Pivot points are not
+used anywhere, per §5.)
 
 **3:1 gate**: reject the setup outright if
 `(target − entry) / (entry − stop) < 3`, where `entry = trigger_price = SH`
@@ -903,6 +929,22 @@ fully zeroes a trade on extension alone. This spec instead uses a hard,
 ATR-denominated cutoff, because it scales with each symbol's own volatility
 — a high-ATR% name and a low-ATR% name extended by the "same percent" are
 not equally extended in risk terms. `N = 6` is used as the reasoned default.
+**Implemented against the unrounded SMA150** (`df["close"].rolling(
+window=150).mean().iloc[-1]`), deliberately **not** `check_sma150()`'s
+display-rounded field — the same fix already applied to `trend_filter.py`
+(§4), for the same reason: a true SMA150/price pair separated by under
+~0.00005 could otherwise have the comparison's outcome flipped purely by
+the rounding. A `NaN` SMA150 (fewer than 150 bars) is checked **before**
+the comparison and rejected with `INSUFFICIENT_HISTORY` (§3's existing
+code) — `NaN > x` is always `False` in Python/pandas, so without this
+explicit guard a short-history frame would silently *pass* the veto
+instead of being correctly rejected for lacking the history to evaluate
+it at all. A further guard, run **before any swing/stop logic** (not
+specific to this veto): over the swing-detection lookback window, every
+`high`/`low`/`close` must be finite and `high >= low` on every bar, or the
+candidate is rejected with `MISSING_OHLCV` — otherwise a stray `NaN`
+deep in that window would silently fail every fractal comparison it's
+part of (again, `NaN > x == False`) rather than being rejected outright.
 
 **Liquidity veto**: reuse §4's floors as a hard gate (not a taper) — already
 a reasoned default by inheritance from the existing eligibility constants.
@@ -912,11 +954,27 @@ long setups while SPY is below its own SMA150. This reuses the *pattern* of
 `compute_market_context()`'s BULL/BEAR classification shape
 (`analyzers/composite.py:90-153,123-128,142`: `close = spy["close"].iloc[-1]`
 vs `sma150 = spy["close"].rolling(window=150).mean().iloc[-1]`), but **not**
-its current behavior — in the composite engine, regime is explicitly
-documented as never a veto, only a threshold modifier (module docstring,
-`composite.py:17-18`). This spec deliberately diverges from that precedent:
-a 2-6 week long-only swing system is more regime-sensitive than a daily
-alert system. The regime value (BULL/BEAR) and whether it vetoed is recorded
+its current behavior or the function itself — `compute_market_context()`
+has an optional live-`yfinance`-fetch fallback when handed no `spy_df`
+(`:99-103`) that this pure-function package must never trigger, and
+returns RS/score fields this spec has no use for; in the composite engine,
+regime is explicitly documented as never a veto, only a threshold modifier
+(module docstring, `composite.py:17-18`). This spec deliberately diverges
+from that precedent: a 2-6 week long-only swing system is more
+regime-sensitive than a daily alert system. **Implemented: missing, too
+short (fewer than 150 bars), or `NaN` SPY close/SMA150 all resolve to
+`regime = "UNKNOWN"`, itself treated as a veto** — the same fail-safe
+direction `compute_market_context()`'s own docstring states ("a data
+outage must not loosen the bar"), applied here as a hard reject rather
+than a fallback threshold. **The regime value is always computed and
+attached first, independent of every other check; the veto itself,
+however, is evaluated last** in the overall precedence order (structural
+checks → stop/target/risk checks → extension veto → regime veto) — so a
+candidate that fails an earlier, more specific check reports *that*
+reason, with the regime value still present on the result, matching this
+section's own "recorded on every candidate... including ones that failed
+for other reasons first" requirement literally. The regime value
+(BULL/BEAR/UNKNOWN) and whether it vetoed is recorded
 on **every** logged candidate row (§12), including ones that failed for
 other reasons first, so the replay/evaluation harness (§13) can later
 separate "rejected for regime" from "rejected for setup quality."
@@ -973,6 +1031,15 @@ default would itself be a parameter chosen without reference to any
 particular owner's risk tolerance, and more importantly, sizing risk capital
 is a decision that must stay in the owner's hands, not be guessed by this
 system.
+
+**When `position_size()` returns `0`** (a valid, positive risk budget
+that still can't afford even one share at the setup's own risk distance —
+`floor(RISK_PER_TRADE_USD / (entry - stop))` rounding down to zero,
+distinct from the unset-env-var case above and from `None`'s "invalid
+input" cases): the message must say so explicitly (e.g. "Risk budget is
+below one share's risk at this entry/stop — no position shown.") rather
+than silently showing "0 shares" with no explanation, or omitting the
+message's sizing line entirely as if it had simply failed.
 
 ---
 
@@ -1037,9 +1104,23 @@ closest precedents are `scanner_results`'s `(passed, reason, details_json)`
 shape (`db/database.py:301-314`) and the `evaluation_run_changes` audit
 shape. This spec's logging is new work, reusing only the *shape* of those
 precedents. Non-exhaustive reason-code set: `NO_SWING_STRUCTURE` (§5, no
-confirmed `SH`/`SL` pair found), `NO_RESISTANCE` (§8), `STOP_CAP_EXCEEDED`
-(§7), `EXTENSION_VETO`, `REGIME_VETO` (§9), `LIQUIDITY_VETO`,
-`TREND_FILTER_FAILED`, `STALE_STRUCTURE` (§5 item 9, identity-based — the
+confirmed `SH`/`SL` pair found), `PULLBACK_LOW_UNCONFIRMED` (§5 item 2 —
+new, implemented alongside `find_confirmed_swing_highs()`: the true
+global-minimum pullback low sits in the last 2 bars, not yet "confirmed"
+2-sessions-old; the setup is rejected outright rather than re-anchored to
+an older, higher, non-minimal low), `PULLBACK_TOO_SHALLOW` (§5 item 3 —
+new, `SH − SL < 1.0×ATR`), `PULLBACK_TOO_OLD` (§5 item 4 — new, `SL`'s bar
+is more than 15 sessions before the scan date), `PRICE_OUTSIDE_RANGE` (§5
+item 5 — new, covers both directions, `close` already `≥ SH` or still
+`≤ SL`, under one code — in practice only the `≥ SH` direction is
+reachable as a *distinct* rejection: `low ≤ close` always holds, so any
+bar whose close reaches `≤ SL` has itself just become the new global
+minimum, which is always the most recent bar, which always fires
+`PULLBACK_LOW_UNCONFIRMED` first), `NO_RESISTANCE` (§8), `RR_BELOW_3` (§8
+— new, the setup-**definition**-time 3:1 gate; deliberately distinct from
+`CHASE_RR_BELOW_3`, §6's *post-fill* recompute, a different pipeline
+stage), `STOP_CAP_EXCEEDED` (§7), `EXTENSION_VETO`, `REGIME_VETO` (§9),
+`LIQUIDITY_VETO`, `TREND_FILTER_FAILED`, `STALE_STRUCTURE` (§5 item 9, identity-based — the
 original `SH`/`SL` point itself is no longer confirmed or valid, not merely
 superseded), `INVALIDATED_BEFORE_FILL` (§6, pre-fill stop/close breach),
 `CHASE_RR_BELOW_3` (post-cross recompute failure, §6), `DATA_NOT_FINAL` (§3,
@@ -1055,7 +1136,14 @@ a rejection — the EOD reconciliation found a fill the live trigger job
 missed; the setup is still treated as filled), `FILLED_STOPPED_SAME_DAY` (§6,
 an event code, not a rejection — the fill session's LOW also breached the
 stop; the setup is treated as filled and immediately stopped out, included
-in every outcome sample). Every candidate row also
+in every outcome sample). The setup-definition step (§5-9) also reuses two
+existing codes beyond their original §3 scope, rather than minting new
+ones for the same underlying "couldn't get usable data to work with"
+family: `MISSING_OHLCV` for a missing required OHLCV column on either
+input frame, a non-finite (`NaN`/`inf`) or inverted (`high < low`) bar
+inside the swing-detection lookback window, and a non-finite or
+non-positive ATR; `INSUFFICIENT_HISTORY` when the unrounded SMA150 the
+extension veto needs is `NaN` (fewer than 150 bars). Every candidate row also
 carries the regime value (BULL/BEAR) regardless of which reason, if any,
 rejected it first — per §9's "logged on every candidate" requirement.
 
@@ -1412,13 +1500,11 @@ caution, applied here to deployment timing instead of DB writes.
    not an open question (see below) — but its field reliability/format in a
    live call is still unverified and should be confirmed before the
    messaging PR implements it.
-7. The exact name/signature of the new helpers this spec requires —
-   `find_confirmed_swing_highs()` (§5) and
-   `get_multiple_prices_with_date()` (§6) — are described here by required
-   behavior, not as finished code; their actual implementation and tests are
-   out of scope for this document (§14, rollout steps 2-3 — not "PR 2/3": only
-   step 1 is split into named sub-PRs 0a/0b/0c; steps 2+ are plain rollout
-   phases, not separately designated PRs).
+7. **`find_confirmed_swing_highs()` (§5) is now IMPLEMENTED** (rollout
+   step 3, `setups/swings.py`) — no longer described by required behavior
+   only. `get_multiple_prices_with_date()` (§6) remains unimplemented and
+   out of scope (§14, rollout steps 4+); their actual implementation and
+   tests were out of scope for this document only before this step.
 8. **Scan timing slot** (§3/§15 agreement): 03:00 IL is proposed specifically
    to avoid contention with the 01:30 IL composite job
    (`scripts/log_composite_signals.py`), not because of any dependency on the

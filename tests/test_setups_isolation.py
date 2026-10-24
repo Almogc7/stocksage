@@ -59,7 +59,7 @@ class TestSetupsIsolationRuntime(unittest.TestCase):
     def test_importing_setups_evaluate_never_pulls_in_agent_core(self):
         result = subprocess.run(
             [sys.executable, "-c",
-             "import setups.evaluate, sys; "
+             "import setups.evaluate, setups.definition, setups.sizing, setups.swings, sys; "
              "assert 'agent.core' not in sys.modules, sys.modules.keys()"],
             capture_output=True, text=True, cwd=str(_SETUPS_DIR.parent),
         )

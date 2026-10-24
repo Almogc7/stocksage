@@ -22,3 +22,21 @@ ZERO_VOLUME_LAST_BAR = "ZERO_VOLUME_LAST_BAR"
 # Trend / eligibility filter (§4, §12)
 TREND_FILTER_FAILED = "TREND_FILTER_FAILED"
 LIQUIDITY_VETO = "LIQUIDITY_VETO"
+
+# Setup definition (§5), stop/target (§7-8), vetoes (§9)
+NO_SWING_STRUCTURE = "NO_SWING_STRUCTURE"
+# New: the true global-minimum pullback low sits in the last 2 bars (not
+# yet "confirmed" 2-sessions-old, §5 item 2) -- rejected outright, never
+# re-anchored to an older, higher (non-minimal) low.
+PULLBACK_LOW_UNCONFIRMED = "PULLBACK_LOW_UNCONFIRMED"
+PULLBACK_TOO_SHALLOW = "PULLBACK_TOO_SHALLOW"  # §5 item 3
+PULLBACK_TOO_OLD = "PULLBACK_TOO_OLD"  # §5 item 4
+PRICE_OUTSIDE_RANGE = "PRICE_OUTSIDE_RANGE"  # §5 item 5 (both directions)
+STOP_CAP_EXCEEDED = "STOP_CAP_EXCEEDED"  # §7
+NO_RESISTANCE = "NO_RESISTANCE"  # §8, Option B
+# New: the setup-DEFINITION-time 3:1 gate (§8) -- deliberately distinct
+# from a future CHASE_RR_BELOW_3 (§6's post-FILL recompute), a different
+# pipeline stage this step does not implement.
+RR_BELOW_3 = "RR_BELOW_3"
+EXTENSION_VETO = "EXTENSION_VETO"  # §9
+REGIME_VETO = "REGIME_VETO"  # §9

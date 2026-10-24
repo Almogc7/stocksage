@@ -39,6 +39,12 @@ from setups.trend_filter import evaluate_trend_and_eligibility
 def evaluate_candidate(
     df_full: pd.DataFrame, scan_date: date, expected_session_date: date
 ) -> CandidateResult:
+    # (0) Not a DataFrame at all (None, or any other wrong type) --
+    # reject before anything downstream (truncate_to_date, normalize_frame)
+    # touches an attribute that doesn't exist on it.
+    if not isinstance(df_full, pd.DataFrame):
+        return CandidateResult(passed=False, reason_code=MISSING_OHLCV)
+
     # (1) No-look-ahead: truncate before anything else touches the data.
     # Idempotent -- truncating an already-truncated frame to the same date
     # is a no-op.

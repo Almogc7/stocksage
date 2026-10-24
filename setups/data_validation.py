@@ -6,7 +6,7 @@ failure, and a stale frame's history length is checked before its date.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 
@@ -27,6 +27,14 @@ def validate_scan_data(df: pd.DataFrame, expected_session_date: date) -> Validat
     # lowercases) before calling this, but a MultiIndex-column frame
     # passed directly must not crash this function either.
     df = _flatten(df)
+
+    # A datetime (rather than a plain date) passed as expected_session_date
+    # must still compare equal to the normalized .date() below -- a bare
+    # date and a datetime at midnight of that same date are never equal
+    # under Python's own comparison rules, which would otherwise falsely
+    # report a fresh frame as DATA_NOT_FINAL.
+    if isinstance(expected_session_date, datetime):
+        expected_session_date = expected_session_date.date()
 
     # (1) MALFORMED_INDEX -- structural, checked before anything that
     # assumes a well-formed index.

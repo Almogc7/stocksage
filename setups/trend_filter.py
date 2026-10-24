@@ -13,7 +13,7 @@ from config import (
     ELIGIBILITY_MIN_PRICE,
 )
 from setups.params import SLOPE_LOOKBACK_SESSIONS
-from setups.reason_codes import LIQUIDITY_VETO, TREND_FILTER_FAILED
+from setups.reason_codes import LIQUIDITY_VETO, MISSING_OHLCV, TREND_FILTER_FAILED
 from setups.results import Result as FilterResult
 
 
@@ -28,7 +28,14 @@ def evaluate_trend_and_eligibility(
     df = _flatten(df)  # same MultiIndex-column defense check_sma150()/_sma200() apply internally
     current_price = float(df["close"].iloc[-1])
 
-    sma = check_sma150(df, current_price)
+    # check_sma150() (analyzers/technical.py) divides by sma150 to get
+    # pct_from_sma -- a degenerate frame (e.g. every close exactly 0)
+    # makes that a ZeroDivisionError. Not this package's file to fix
+    # internally, so the call is guarded here instead.
+    try:
+        sma = check_sma150(df, current_price)
+    except (ZeroDivisionError, ValueError):
+        return FilterResult(passed=False, reason_code=MISSING_OHLCV)
     if not sma["above_sma150"]:
         return FilterResult(passed=False, reason_code=TREND_FILTER_FAILED)
 
