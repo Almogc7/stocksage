@@ -606,19 +606,46 @@ def _seed_symbol(symbol: str, category: str) -> None:
     - Already exists (enabled=1) → row unchanged
     - Already exists (enabled=0, user-removed) → row unchanged (NOT re-enabled)
 
+    Canonicalize-on-write: resolves which spelling to tag in
+    symbol_categories exactly the way add_to_watchlist() resolves which
+    spelling to write for watchlist.category -- reuse the symbol's current
+    watchlist.category if it canonically matches, else the first (sorted)
+    existing symbol_categories tag that canonically matches, else the
+    incoming spelling as given. A single INSERT OR IGNORE then writes that
+    resolved spelling, so a restart can never add a second, differently-
+    spelled row for a category the symbol is already tagged under.
+
     This is the only path used during populate_from_config(). It is never
     used by user-facing commands so that seed data can never restore
     symbols the user has intentionally removed.
     """
     sym = symbol.upper()
     with _connect() as conn:
+        row = conn.execute(
+            "SELECT category FROM watchlist WHERE symbol = ?", (sym,)
+        ).fetchone()
+        current_primary = row["category"] if row is not None else None
+
+        tags = sorted(
+            r["category"] for r in conn.execute(
+                "SELECT category FROM symbol_categories WHERE symbol = ?", (sym,)
+            ).fetchall()
+        )
+
+        target = canonical_category(category)
+        if current_primary is not None and canonical_category(current_primary) == target:
+            resolved = current_primary
+        else:
+            match = next((t for t in tags if canonical_category(t) == target), None)
+            resolved = match if match is not None else category
+
         conn.execute(
             "INSERT OR IGNORE INTO watchlist (symbol, category, enabled) VALUES (?, ?, 1)",
             (sym, category),
         )
         conn.execute(
             "INSERT OR IGNORE INTO symbol_categories (symbol, category) VALUES (?, ?)",
-            (sym, category),
+            (sym, resolved),
         )
 
 
