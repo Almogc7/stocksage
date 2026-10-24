@@ -356,6 +356,20 @@ class TestActiveListConstraints(WatchlistEvaluatorTestCase):
         bank_active = [r for r in result.symbol_results if r.proposed_state == "ACTIVE"]
         self.assertLessEqual(len(bank_active), 8)
 
+    def test_bank_maximum_8_enforced_english_category_name(self):
+        """PR A (English category names): the bank-sector cap must be
+        enforced identically for a category stored under "Financials"
+        (the English canonical name) as for "פיננסים" above -- same test,
+        other spelling."""
+        symbols = [f"BANKEN{i}" for i in range(12)]
+        self._seed({"Financials": symbols})
+        market_results = {s: _market_result(s) for s in symbols}
+        histories = {s: make_trending_df(n=252) for s in symbols}
+        client = FakeMarketDataClient(market_results, histories)
+        result = self.evaluator.run_dry_run_evaluation(client=client)
+        bank_active = [r for r in result.symbol_results if r.proposed_state == "ACTIVE"]
+        self.assertLessEqual(len(bank_active), 8)
+
     def test_replacement_margin_enforced(self):
         # Fill ACTIVE to the cap with a known score, then offer one candidate
         # that beats the lowest by less than the margin (should NOT replace)
@@ -456,6 +470,30 @@ class TestDataSafetyAndStats(WatchlistEvaluatorTestCase):
         source = inspect.getsource(mod)
         self.assertNotIn("import telegram", source.lower())
         self.assertNotIn("bot.telegram_bot", source.lower())
+
+
+class TestIsBankCategoryEquivalence(unittest.TestCase):
+    """PR A (English category names): _is_bank() must treat "פיננסים"
+    and "Financials" identically -- a direct, isolated unit test of the
+    function itself, complementing the slower full-pipeline tests above
+    (test_bank_maximum_8_enforced / ..._english_category_name)."""
+
+    def test_hebrew_category_is_bank(self):
+        from services.watchlist_evaluator import _is_bank
+        self.assertTrue(_is_bank(["פיננסים"]))
+
+    def test_english_category_is_bank(self):
+        from services.watchlist_evaluator import _is_bank
+        self.assertTrue(_is_bank(["Financials"]))
+
+    def test_unrelated_category_is_not_bank(self):
+        from services.watchlist_evaluator import _is_bank
+        self.assertFalse(_is_bank(["AI & Semiconductors"]))
+
+    def test_mixed_categories_list_with_either_spelling_is_bank(self):
+        from services.watchlist_evaluator import _is_bank
+        self.assertTrue(_is_bank(["AI & Semiconductors", "פיננסים"]))
+        self.assertTrue(_is_bank(["AI & Semiconductors", "Financials"]))
 
 
 if __name__ == "__main__":

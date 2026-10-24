@@ -94,6 +94,7 @@ from config import (
     RSI_VETO_MAX,
     RSI_VETO_MIN,
     WATCHLIST_PROVIDER_OUTAGE_THRESHOLD_PCT,
+    canonical_category,
 )
 from data.market_data_validator import MarketDataClient, ProviderStatus
 
@@ -244,7 +245,7 @@ class _ActiveTracker:
 
 
 def _is_bank(categories: list[str]) -> bool:
-    return any(cat in BANK_CATEGORIES for cat in categories)
+    return any(canonical_category(cat) in BANK_CATEGORIES for cat in categories)
 
 
 def _price_data_from_result(market_result) -> dict:

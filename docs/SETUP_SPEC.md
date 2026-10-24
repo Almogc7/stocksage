@@ -102,6 +102,14 @@ AND enabled = 1
   its category is in `{"מדדים", "ETFs"}` **or** its `security_type` is in
   `_NON_STOCK_TYPES`, logging every excluded row with an explicit reason
   (`EXCLUDED_WL_STATE`, `EXCLUDED_CATEGORY`, or `EXCLUDED_SECURITY_TYPE`, §12).
+  **Implementation note (PR A, "English category names" — code only, no
+  `WATCHLIST` key renamed yet):** `setups/universe.py`'s exclusion set is
+  now held in its canonical English form (`{"Indices", "ETFs"}`), and the
+  comparison is made via `config.canonical_category(category)` rather
+  than a raw equality check — so a row stored under either `"מדדים"` or
+  `"Indices"` is excluded identically. The citation above is unaffected;
+  the Hebrew string is still a real `WATCHLIST` key today, just no longer
+  the literal the code compares against directly.
 - **Removes the dependency on the 02:30 IL watchlist evaluation finishing**
   (§3): since this universe is read directly from the `watchlist` table's
   current `wl_state`/`category`/`security_type` values at scan time, rather

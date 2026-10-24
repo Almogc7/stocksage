@@ -11,6 +11,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 
+from config import canonical_category
 from setups.params import DEFAULT_SECURITY_TYPE, _NON_STOCK_TYPES
 from setups.reason_codes import (
     EXCLUDED_CATEGORY,
@@ -20,7 +21,10 @@ from setups.reason_codes import (
 
 # §2: category keys to exclude -- confirmed present in config.WATCHLIST by
 # tests/test_setups_universe.py (guards a typo'd/reversed-direction key).
-_EXCLUDED_CATEGORIES = frozenset({"מדדים", "ETFs"})
+# Canonical (English) form -- a row stored under either spelling (the
+# WATCHLIST key is still Hebrew today; PR A only widens matching, see
+# config.canonical_category()) is excluded identically.
+_EXCLUDED_CATEGORIES = frozenset({"Indices", "ETFs"})
 
 _ALLOWED_WL_STATES = frozenset({"ACTIVE", "MONITOR"})
 
@@ -55,7 +59,7 @@ def get_setup_universe(conn: sqlite3.Connection) -> UniverseResult:
                 "symbol": symbol, "reason_code": EXCLUDED_WL_STATE, "wl_state": wl_state,
             })
             continue
-        if category in _EXCLUDED_CATEGORIES:
+        if canonical_category(category) in _EXCLUDED_CATEGORIES:
             result.excluded.append({
                 "symbol": symbol, "reason_code": EXCLUDED_CATEGORY, "category": category,
             })

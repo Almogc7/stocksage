@@ -4,6 +4,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from config import WATCHLIST, canonical_category
+
 _KNOWN_INDICES_MIGRATION: frozenset[str] = frozenset({"^GSPC", "^IXIC", "^DJI", "^RUT", "^VIX"})
 _KNOWN_ETFS_MIGRATION: frozenset[str] = frozenset({
     "SPY", "VOO", "QQQ", "VGT", "XLK", "SOXX", "CIBR", "ARKK", "SCHG",
@@ -1013,19 +1015,42 @@ def run_initial_classification(watchlist_config: dict) -> dict:
             summary[symbol] = "USER_REMOVED"
             continue
 
-        # CCC reclassification: mortgage REIT, not cloud/software
+        # CCC reclassification: mortgage REIT, not cloud/software.
+        # Resolves the live spelling dynamically from config.WATCHLIST
+        # (never a hardcoded literal, either spelling) -- today that's
+        # still "פיננסים", since PR A (English category names) hasn't
+        # renamed WATCHLIST's own keys yet, so this writes byte-for-byte
+        # the same value it always has. Skips the write entirely once
+        # CCC's stored category already canonicalizes to "Financials"
+        # under either spelling, rather than unconditionally re-running
+        # DELETE+INSERT every pass.
         if symbol == "CCC":
-            with _connect() as conn:
-                conn.execute(
-                    "UPDATE watchlist SET category = 'פיננסים' WHERE symbol = 'CCC'"
+            financials_key = next(
+                (k for k in WATCHLIST if canonical_category(k) == "Financials"), None
+            )
+            if financials_key is not None:
+                with _connect() as conn:
+                    current = conn.execute(
+                        "SELECT category FROM watchlist WHERE symbol = 'CCC'"
+                    ).fetchone()
+                already_financials = (
+                    current is not None
+                    and canonical_category(current["category"]) == "Financials"
                 )
-                conn.execute(
-                    "DELETE FROM symbol_categories WHERE symbol = 'CCC'"
-                )
-                conn.execute(
-                    "INSERT OR IGNORE INTO symbol_categories (symbol, category)"
-                    " VALUES ('CCC', 'פיננסים')"
-                )
+                if not already_financials:
+                    with _connect() as conn:
+                        conn.execute(
+                            "UPDATE watchlist SET category = ? WHERE symbol = 'CCC'",
+                            (financials_key,),
+                        )
+                        conn.execute(
+                            "DELETE FROM symbol_categories WHERE symbol = 'CCC'"
+                        )
+                        conn.execute(
+                            "INSERT OR IGNORE INTO symbol_categories (symbol, category)"
+                            " VALUES ('CCC', ?)",
+                            (financials_key,),
+                        )
 
         if symbol in INELIGIBLE_REASONS:
             reason = INELIGIBLE_REASONS[symbol]
