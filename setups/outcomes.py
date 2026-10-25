@@ -109,6 +109,37 @@ def _validate_setup(setup: SetupDefinition) -> None:
         )
 
 
+def _clean_reference_sessions(reference_sessions) -> list:
+    """Normalizes a caller-supplied reference_sessions series once, up
+    front: drop missing/unparsable entries (None, NaT), normalize every
+    remaining one with _normalize_date (tz-aware and tz-naive alike),
+    remove duplicates, and sort ascending. Without this, a duplicated or
+    unsorted entry could desynchronize _sessions_through()/
+    _next_n_sessions()'s session counting from df_future's own row count
+    -- the same class of problem df_future itself is guarded against by
+    _frame_is_malformed()."""
+    cleaned = []
+    seen = set()
+    for d in reference_sessions:
+        if d is None:
+            continue
+        try:
+            if pd.isna(d):
+                continue
+        except (TypeError, ValueError):
+            pass
+        try:
+            normalized = _normalize_date(d)
+        except Exception:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned.append(normalized)
+    cleaned.sort()
+    return cleaned
+
+
 def _frame_is_malformed(df: pd.DataFrame) -> bool:
     """True if df_future can't be used at all: missing a required OHLC
     column, or an index that isn't strictly increasing (unsorted or
@@ -179,6 +210,13 @@ def simulate_outcome(
     holiday-aware calendar.
     """
     _validate_setup(setup)  # caller bug -> raises, never a data problem
+
+    if reference_sessions is not None:
+        reference_sessions = _clean_reference_sessions(reference_sessions)
+        if not reference_sessions:
+            # Nothing usable survived cleaning -- same "no usable
+            # reference" posture as an explicitly empty list.
+            return OutcomeResult(status=OPEN_AT_END)
 
     # Frame guards -- never raise on data, always DATA_GAP instead.
     if not isinstance(df_future, pd.DataFrame):

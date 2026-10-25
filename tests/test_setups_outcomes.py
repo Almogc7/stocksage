@@ -640,5 +640,82 @@ class TestSetupValidation(unittest.TestCase):
             simulate_outcome(bad_setup, df)
 
 
+class TestReferenceSessionsCleaning(unittest.TestCase):
+    """reference_sessions is normalized once up front (deduped, sorted,
+    missing/unparsable entries dropped) -- the same guarding posture
+    df_future itself gets via _frame_is_malformed()."""
+
+    def test_duplicate_date_in_reference_sessions_does_not_inflate_session_count(self):
+        fill_date = sessions_after(SCAN_DATE, 1)[0]
+        post = sessions_after(fill_date, 29)  # one short of the 30-session timeout
+        df = make_bars([fill_date] + post, [FILL_ORDINARY_A] + [BENIGN_A] * 29)
+
+        clean_reference = [fill_date] + post
+        result_clean = simulate_outcome(SETUP_A, df, reference_sessions=clean_reference)
+        self.assertEqual(result_clean.status, OPEN_AT_END)
+
+        # The exact review repro: duplicating one date must NOT inflate
+        # the session count to 30 and falsely resolve as timeout_30.
+        duplicated_reference = clean_reference + [post[5]]
+        result_dup = simulate_outcome(SETUP_A, df, reference_sessions=duplicated_reference)
+        self.assertEqual(result_dup.status, OPEN_AT_END)
+        self.assertNotEqual(result_dup.status, BARRIER_TIMEOUT_30)
+        self.assertIsNone(result_dup.sessions_held)
+
+    def test_unsorted_reference_sessions_gives_same_result_as_sorted(self):
+        fill_date = sessions_after(SCAN_DATE, 1)[0]
+        post = sessions_after(fill_date, 2)
+        stop_bar = (98.0, 100.0, 90.0, 92.0)
+        df = make_bars([fill_date] + post, [FILL_ORDINARY_A, BENIGN_A, stop_bar])
+
+        sorted_reference = [fill_date, post[0], post[1]]
+        unsorted_reference = [post[1], fill_date, post[0]]
+
+        result_sorted = simulate_outcome(SETUP_A, df, reference_sessions=sorted_reference)
+        result_unsorted = simulate_outcome(SETUP_A, df, reference_sessions=unsorted_reference)
+
+        self.assertEqual(result_sorted.status, BARRIER_STOP)
+        self.assertEqual(result_unsorted.status, result_sorted.status)
+        self.assertEqual(result_unsorted.exit_price, result_sorted.exit_price)
+        self.assertEqual(result_unsorted.sessions_held, result_sorted.sessions_held)
+
+    def test_reference_sessions_with_none_and_nat_entries_does_not_raise(self):
+        fill_date = sessions_after(SCAN_DATE, 1)[0]
+        post = sessions_after(fill_date, 2)
+        stop_bar = (98.0, 100.0, 90.0, 92.0)
+        df = make_bars([fill_date] + post, [FILL_ORDINARY_A, BENIGN_A, stop_bar])
+
+        messy_reference = [fill_date, None, pd.NaT, post[0], post[1]]
+        clean_reference = [fill_date, post[0], post[1]]
+
+        result_messy = simulate_outcome(SETUP_A, df, reference_sessions=messy_reference)
+        result_clean = simulate_outcome(SETUP_A, df, reference_sessions=clean_reference)
+
+        self.assertEqual(result_messy.status, BARRIER_STOP)
+        self.assertEqual(result_messy.status, result_clean.status)
+        self.assertEqual(result_messy.exit_price, result_clean.exit_price)
+        self.assertEqual(result_messy.sessions_held, result_clean.sessions_held)
+
+    def test_tz_aware_and_tz_naive_reference_entries_match(self):
+        fill_date = sessions_after(SCAN_DATE, 1)[0]
+        post = sessions_after(fill_date, 2)
+        stop_bar = (98.0, 100.0, 90.0, 92.0)
+        df = make_bars([fill_date] + post, [FILL_ORDINARY_A, BENIGN_A, stop_bar])
+
+        naive_reference = [fill_date, post[0], post[1]]
+        mixed_reference = [
+            pd.Timestamp(fill_date, tz="UTC"),
+            post[0],
+            pd.Timestamp(post[1], tz="America/New_York"),
+        ]
+
+        result_naive = simulate_outcome(SETUP_A, df, reference_sessions=naive_reference)
+        result_mixed = simulate_outcome(SETUP_A, df, reference_sessions=mixed_reference)
+
+        self.assertEqual(result_mixed.status, result_naive.status)
+        self.assertEqual(result_mixed.exit_price, result_naive.exit_price)
+        self.assertEqual(result_mixed.sessions_held, result_naive.sessions_held)
+
+
 if __name__ == "__main__":
     unittest.main()
