@@ -717,5 +717,40 @@ class TestReferenceSessionsCleaning(unittest.TestCase):
         self.assertEqual(result_mixed.sessions_held, result_naive.sessions_held)
 
 
+class TestChaseRrBelow3FloatSafety(unittest.TestCase):
+    """RR_EPSILON (§8/§12 float safety, promoting V3 to primary): a
+    MEASURED_3R-shaped setup's rr, recomputed at a no-gap fill exactly at
+    the trigger, must never spuriously reject as CHASE_RR_BELOW_3 due to
+    float drift (target was built as trigger + min_rr*risk; recomputing
+    (target-trigger)/risk at fill can land a hair under min_rr by
+    subtraction/division rounding alone)."""
+
+    def test_measured_3r_setup_never_chases_on_a_fill_exactly_at_trigger(self):
+        import random
+        rng = random.Random(4321)
+        for _ in range(200):
+            trigger = rng.uniform(10.0, 500.0)
+            risk_fraction = rng.uniform(0.01, 0.10)
+            stop = trigger * (1.0 - risk_fraction)
+            risk = trigger - stop
+            target = trigger + V1_OUTCOME_PARAMS.min_rr * risk
+            setup = make_setup(trigger, stop, stop, target)
+            dates = sessions_after(SCAN_DATE, 1)
+            bar = (trigger, trigger + 0.01, trigger - 0.01, trigger)  # no-gap fill at trigger
+            df = make_bars(dates, [bar])
+            result = simulate_outcome(setup, df)
+            self.assertNotEqual(result.status, CHASE_RR_BELOW_3,
+                                 f"trigger={trigger}, stop={stop}, target={target}")
+
+    def test_existing_chase_rr_boundary_tests_unaffected_by_epsilon(self):
+        """Re-exercises TestFillRRGateOrdering's own exact-3.0-boundary
+        case to confirm RR_EPSILON doesn't change pre-existing behavior."""
+        dates = sessions_after(SCAN_DATE, 2)
+        df = make_bars(dates, [FILL_ORDINARY_A, TARGET_HIT_A])  # RR == 3.0 exactly
+        result = simulate_outcome(SETUP_A, df)
+        self.assertNotEqual(result.status, CHASE_RR_BELOW_3)
+        self.assertEqual(result.status, BARRIER_TARGET)
+
+
 if __name__ == "__main__":
     unittest.main()

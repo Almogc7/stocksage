@@ -1281,19 +1281,51 @@ mechanism: the 3:1 gate's ≥4.5×ATR-above-`SH` requirement, combined with
 uptrends typically having no older swing high above their own most recent
 one, means V1 is expected to mostly log `NO_RESISTANCE`.
 
-**V1 is the single primary pre-registered hypothesis.** Everything specified
-in this document (§1-12) is V1. Three additional variants are defined for
-**sensitivity analysis only** — they exist to show how sensitive V1's results
-are to specific design choices, not to compete with V1 for "best result":
+**SETTLED 2026-10-25 — V3 promoted to primary, outcome-blind.** The
+outcome-blind feasibility count this section's own rule already licenses
+("adjusting parameters only in response to these counts, only before the
+freeze") ran against 40 random symbols × 3 calendar years (~30,040
+symbol-nights) and gave **V1 and V2 zero fired setups**: 2,073 nights
+cleared every structural check (§3-7, §9) and died at the target step
+alone — 848 `NO_RESISTANCE`, 1,225 `RR_BELOW_3`. This decision was made
+**before any outcome or return was computed** — it rests only on counts,
+never on which variant "performed better," so it is not the kind of
+after-the-fact cherry-picking the paragraph above (and §14's milestone
+gating) exists to prevent; it is that same rule's explicit carve-out. V1
+and V2 are now sensitivity variants; V4 remains sensitivity-only and
+unimplemented.
 
-- **V2** — identical to V1 except `calc_swing_levels` lookback widened to
-  120 bars (vs. the 50-bar default, §5).
-- **V3** — identical to V1 except using Option A's measured-3R target (§8)
-  instead of V1's Option-B reject-on-no-resistance.
-- **V4** — identical to V1 except the target is the highest high of the last
-  252 bars, if above `SH` (§8) — a direct test of whether a further-out,
-  non-swing-level resistance reference changes the `NO_RESISTANCE` dominance
-  predicted above.
+- **V1** (sensitivity) — the original hypothesis: target-selection
+  Option B, reject-`NO_RESISTANCE` (§8). Everything else in this document
+  (§1-12) describes V1's mechanics exactly; V3 differs from it only at the
+  target step.
+- **V2** (sensitivity) — identical to V1 except `calc_swing_levels` lookback
+  widened to 120 bars (vs. the 50-bar default, §5).
+- **V3 (PRIMARY)** — identical to V1 except the target step (§8): if no
+  confirmed swing high above the trigger exists within the swing lookback,
+  `target = trigger + min_rr × risk` (a measured-3R target) instead of
+  rejecting `NO_RESISTANCE`. If a confirmed swing high above the trigger
+  *does* exist, nothing changes — the nearest such high is still the
+  target, still gated by `RR_BELOW_3` if it's closer than `min_rr × risk`.
+  **The 3:1 R:R is true by construction for every measured-3R setup** — the
+  hypothesis actually under test becomes "does a structural-stop +
+  exactly-3R-target entry have positive expectancy," not "was a discovered
+  resistance level a genuine edge." **The primary analysis pools both
+  target sources** (`RESISTANCE` and `MEASURED_3R`) into one V3 sample; a
+  report stratified by `target_source` is secondary/diagnostic only, never
+  a second primary hypothesis. **Caveat:** "no resistance" means none
+  confirmed within `swing_lookback_bars` (50 for V1/V3, 120 for V2) — a
+  genuine higher high further back is undetected by this check, not ruled
+  out. A fixed `RR_EPSILON = 1e-9` tolerance on the R:R gate's comparison
+  (both at setup-definition time, §8, and the outcome module's
+  `CHASE_RR_BELOW_3` recompute, §12) is a documented implementation detail
+  guarding against float drift around the exact `min_rr` boundary a
+  measured-3R target sits on — not a loosening of the 3:1 threshold
+  itself.
+- **V4** (sensitivity, not yet implemented) — identical to V1 except the
+  target is the highest high of the last 252 bars, if above `SH` (§8) — a
+  direct test of whether a further-out, non-swing-level resistance
+  reference changes the `NO_RESISTANCE` dominance V1/V2 showed above.
 
 **No variant can be promoted to primary on the strength of the same replay
 data that produced it.** If any of V2/V3/V4 looks more favorable than V1 in
@@ -1613,9 +1645,11 @@ after the 01:30 IL `log_composite_signals.py` job purely to avoid resource
 contention, with no data dependency on the 02:30 IL watchlist evaluation,
 §2/§3); the **trigger alert uses normal, non-silent notifications** (§11);
 the outcome logic lives in a new, separate module (not editing
-`populate_outcomes.py`), parity-tested against `compute_outcome()`; V1 is the
-sole primary pre-registered hypothesis, V2/V3/V4 are sensitivity analyses
-only (§13); the trigger is a **touch**, not a confirmed break — `HIGH ≥ SH`,
+`populate_outcomes.py`), parity-tested against `compute_outcome()`; **V3 is
+the primary pre-registered hypothesis** (promoted from V1 on 2026-10-25,
+outcome-blind, per the feasibility-count evidence in §13 — V1/V2 are now
+sensitivity analyses, V4 remains sensitivity-only and unimplemented); the
+trigger is a **touch**, not a confirmed break — `HIGH ≥ SH`,
 no added buffer (§5 item 6); the baseline is a **mechanics-matched control**,
 not same-date peers (§13); PR 0c's isolation requirement is enforced as a
 test on the new code, constraining only the new modules — it is independent

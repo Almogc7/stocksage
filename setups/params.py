@@ -6,7 +6,7 @@ this stack must not touch Stack A/B's own files. Every value here is a
 pre-registration file (§13) before any replay run, not derived from
 observed data.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # §4: "rising SMA150" lookback -- compare today's SMA150 to its value this
 # many sessions ago. Reasoned default: ~1 trading month.
@@ -43,9 +43,9 @@ DEFAULT_SECURITY_TYPE = "stock"
 #
 # Each is a documented placeholder pending the pre-registration freeze
 # (§13), not derived from observed data. `SWING_LOOKBACK_BARS` (§13's V2
-# widens it to 120) and `TARGET_MODE` (§13's V3/V4) are the two knobs
-# named as future-variant seams -- only V1 ("NEAREST_RESISTANCE") is
-# implemented; nothing branches on a different target_mode value yet.
+# widens it to 120) and `TARGET_MODE` (§13's V3, now promoted to primary --
+# see TARGET_MODE_MEASURED_3R_IF_NO_RESISTANCE below -- and a future V4)
+# are the two knobs named as future-variant seams.
 
 # §5 item 2/§8: swing-high lookback, shared by find_confirmed_swing_highs()
 # and the target search (both read the same confirmed-high list).
@@ -73,10 +73,24 @@ STOP_CAP_ATR_MULT = 5.0
 MIN_RR = 3.0
 
 # §8: target-selection mode. V1 (default) = Option B, reject via
-# NO_RESISTANCE when none found. A future V3 ("MEASURED_3R", Option A) or
-# V4 ("HIGH_252") variant would add a new mode value here -- not branched
-# on yet, since only V1 is implemented.
+# NO_RESISTANCE when none found. A future V4 ("HIGH_252") variant would
+# add a new mode value here -- not branched on yet.
 TARGET_MODE = "NEAREST_RESISTANCE"
+
+# §8/§13, V3 (promoted to primary -- the counts-only feasibility sample
+# gave V1/V2 zero setups, 2,073 nights dying at the target step alone:
+# 848 NO_RESISTANCE, 1,225 RR_BELOW_3). Falls back to a measured-3R
+# target (trigger + min_rr * risk) only when NO confirmed swing high
+# above the trigger exists within swing_lookback_bars; identical to V1
+# otherwise, including RR_BELOW_3 when a confirmed resistance exists but
+# is closer than min_rr * risk.
+TARGET_MODE_MEASURED_3R_IF_NO_RESISTANCE = "MEASURED_3R_IF_NO_RESISTANCE"
+
+# §8 float-safety: the R:R gate's comparison tolerance. A MEASURED_3R
+# target stores rr as exactly params.min_rr (not a float division
+# result), but the gate itself also uses this epsilon so the robustness
+# doesn't depend on that exact-value choice staying true forever.
+RR_EPSILON = 1e-9
 
 # §9: extension veto, in ATR multiples above (unrounded) SMA150.
 EXTENSION_VETO_ATR = 6.0
@@ -105,6 +119,10 @@ class SetupParams:
 
 
 V1_PARAMS = SetupParams()
+
+# §13: V3, promoted to primary (see TARGET_MODE_MEASURED_3R_IF_NO_RESISTANCE
+# above) -- identical to V1 except the target step.
+V3_PARAMS = replace(V1_PARAMS, target_mode=TARGET_MODE_MEASURED_3R_IF_NO_RESISTANCE)
 
 
 # ── Outcome simulation (§6, §12) -- reasoned defaults for V1 ───────────────

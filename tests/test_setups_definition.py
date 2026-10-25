@@ -9,7 +9,7 @@ import pandas as pd
 from tests.fixtures import make_falling_df, make_rising_df, make_trending_df
 
 from setups.definition import Rejection, SetupDefinition, define_setup
-from setups.params import SetupParams
+from setups.params import RR_EPSILON, SetupParams, V1_PARAMS, V3_PARAMS
 from setups.reason_codes import (
     DATA_NOT_FINAL,
     EXTENSION_VETO,
@@ -630,6 +630,258 @@ class TestNoLookAheadProperty(unittest.TestCase):
                 spy_ext = _frame_from_close(spy_tail_close, index=full_index)
                 result = define_setup(df_ext, scan_date, spy_ext)
                 self._assert_same_result(clean, result)
+
+
+def _no_resistance_close():
+    """Same SH/SL/pullback shape as test_no_resistance_when_no_older_confirmed_high_above_sh:
+    exactly one confirmed swing high (the trigger itself), nothing above
+    it -- the common case the spec's own arithmetic note predicts."""
+    lead = np.linspace(90, 95, 150).round().astype(int).tolist()
+    local = (
+        _ramp(99 - lead[-1], 1)
+        + _ramp(99 - 94, -1)
+        + _ramp(8, 0)
+        + _ramp(97 - 94, 1)
+    )
+    close = list(lead)
+    for step in local:
+        close.append(close[-1] + step)
+    return close
+
+
+def _run_boundary_with_params(df, scan_date, spy, atr, confirmed_highs, sma150, params):
+    with patch("setups.definition.calc_atr", return_value={"atr": atr}), \
+         patch("setups.definition.find_confirmed_swing_highs", return_value=confirmed_highs), \
+         patch("setups.definition._unrounded_sma150", return_value=sma150), \
+         patch("setups.definition._compute_regime", return_value="BULL"):
+        return define_setup(df, scan_date, spy, params=params)
+
+
+class TestV3MeasuredTarget(unittest.TestCase):
+    """§8/§13, V3 (promoted to primary): measured-3R target when no
+    confirmed resistance exists above the trigger; identical to V1
+    whenever a confirmed resistance DOES exist."""
+
+    def _no_resistance_frame(self):
+        close = _no_resistance_close()
+        df = _frame_from_close(close)
+        spy = _bull_spy(len(close), index=df.index)
+        scan_date = df.index[-1].date()
+        return df, spy, scan_date
+
+    def test_v3_target_mode_measured_3r_when_no_resistance_above_trigger(self):
+        df, spy, scan_date = self._no_resistance_frame()
+        result = define_setup(df, scan_date, spy, params=V3_PARAMS)
+        self.assertIsInstance(result, SetupDefinition)
+        self.assertEqual(result.target, result.trigger + V3_PARAMS.min_rr * result.risk)
+        self.assertEqual(result.target_source, "MEASURED_3R")
+
+    def test_v3_rr_is_exactly_min_rr_by_construction_for_measured_3r(self):
+        df, spy, scan_date = self._no_resistance_frame()
+        result = define_setup(df, scan_date, spy, params=V3_PARAMS)
+        self.assertIsInstance(result, SetupDefinition)
+        self.assertEqual(result.rr, V3_PARAMS.min_rr)
+
+    def test_v1_unchanged_still_rejects_no_resistance_on_same_frame(self):
+        df, spy, scan_date = self._no_resistance_frame()
+        result = define_setup(df, scan_date, spy, params=V1_PARAMS)
+        self.assertIsInstance(result, Rejection)
+        self.assertEqual(result.reason_code, NO_RESISTANCE)
+
+    def test_v3_nearer_resistance_below_min_rr_still_rejects_rr_below_3(self):
+        df, spy, scan_date, sh_date = _boundary_base_frame()
+        older = df.index[1].date()
+        # risk=10 (real SL=91, atr=2.0); target=115 -> rr=(115-100)/10=1.5 <3.
+        # A confirmed resistance exists, so V3 must behave exactly like V1
+        # -- no measured-3R fallback.
+        result = _run_boundary_with_params(
+            df, scan_date, spy, 2.0, [(older, 115.0), (sh_date, 100.0)], 90.0, V3_PARAMS,
+        )
+        self.assertIsInstance(result, Rejection)
+        self.assertEqual(result.reason_code, RR_BELOW_3)
+
+    def test_v3_resistance_at_or_above_min_rr_uses_resistance_not_measured_3r(self):
+        df, spy, scan_date, sh_date = _boundary_base_frame()
+        older = df.index[1].date()
+        result = _run_boundary_with_params(
+            df, scan_date, spy, 2.0, [(older, 130.0), (sh_date, 100.0)], 90.0, V3_PARAMS,
+        )
+        self.assertIsInstance(result, SetupDefinition)
+        self.assertEqual(result.target, 130.0)
+        self.assertEqual(result.target_source, "RESISTANCE")
+
+    def test_v3_no_look_ahead_corrupting_bars_after_scan_date_leaves_result_identical(self):
+        close = _no_resistance_close()
+        base_index = pd.bdate_range(end="2026-06-15", periods=len(close))
+        scan_date = base_index[-1].date()
+        clean_df = _frame_from_close(close, index=base_index)
+        clean_spy = _bull_spy(len(close), index=base_index)
+        clean = define_setup(clean_df, scan_date, clean_spy, params=V3_PARAMS)
+        self.assertIsInstance(clean, SetupDefinition)
+        self.assertEqual(clean.target_source, "MEASURED_3R")
+
+        extra_dates = pd.bdate_range(start=base_index[-1] + pd.Timedelta(days=1), periods=5)
+        full_index = base_index.append(extra_dates)
+        spy_tail_close = list(np.linspace(400.0, 420.0, len(close))) + [420.0] * 5
+        tails = {
+            "breakout": [99, 101, 105, 110, 115],
+            "crash": [90, 80, 70, 60, 50],
+            "extreme": [v * 1000 for v in [97, 97, 97, 97, 97]],
+            "nan": [float("nan")] * 5,
+        }
+        for name, tail in tails.items():
+            with self.subTest(corruption=name):
+                df_ext = _frame_from_close(close + tail, index=full_index)
+                spy_ext = _frame_from_close(spy_tail_close, index=full_index)
+                result = define_setup(df_ext, scan_date, spy_ext, params=V3_PARAMS)
+                self.assertEqual(type(clean), type(result))
+                self.assertEqual(vars(clean), vars(result))
+
+    def test_v3_params_constant_matches_v1_except_target_mode(self):
+        import dataclasses
+        v1_dict = dataclasses.asdict(V1_PARAMS)
+        v3_dict = dataclasses.asdict(V3_PARAMS)
+        diffs = {k for k in v1_dict if v1_dict[k] != v3_dict[k]}
+        self.assertEqual(diffs, {"target_mode"})
+        self.assertEqual(V3_PARAMS.target_mode, "MEASURED_3R_IF_NO_RESISTANCE")
+
+
+class TestV3MeasuredTargetFloatSafety(unittest.TestCase):
+    """RR_EPSILON (§8 float safety): a MEASURED_3R target's rr is stored
+    as exactly params.min_rr, and the gate's comparison includes an
+    epsilon tolerance against float drift either way."""
+
+    def test_v3_never_rejects_rr_below_3_over_randomized_trigger_stop_pairs(self):
+        import random
+        rng = random.Random(1234)
+        for _ in range(200):
+            trigger = rng.uniform(10.0, 500.0)
+            risk_fraction = rng.uniform(0.01, 0.10)  # realistic-looking stop distance
+            stop = trigger * (1.0 - risk_fraction)
+            atr = (trigger - stop) / rng.uniform(1.5, 4.0)  # keeps stop cap/pullback plausible
+            df, spy, scan_date, sh_date = _boundary_base_frame()
+            result = _run_boundary_with_params(
+                df, scan_date, spy, atr, [(sh_date, trigger)], 90.0, V3_PARAMS,
+            )
+            # Mocked SL is always 91 (the base frame's real low); only the
+            # trigger/atr vary here, so risk is whatever stop-cap/pullback
+            # allow -- skip combinations the EARLIER gates themselves
+            # would reject (this test is only about the RR gate).
+            if isinstance(result, Rejection) and result.reason_code != RR_BELOW_3:
+                continue
+            self.assertNotIsInstance(result, Rejection,
+                                      f"trigger={trigger}, stop={stop}, atr={atr}")
+            self.assertEqual(result.target_source, "MEASURED_3R")
+
+    def test_rr_exactly_3_still_passes_and_just_under_3_still_rejects(self):
+        df, spy, scan_date, sh_date = _boundary_base_frame()
+        older = df.index[1].date()
+        passing = _run_boundary(df, scan_date, spy, 2.0, [(older, 130.0), (sh_date, 100.0)], 90.0)
+        self.assertIsInstance(passing, SetupDefinition)
+        self.assertEqual(passing.rr, 3.0)
+        failing = _run_boundary(df, scan_date, spy, 2.0, [(older, 129.9), (sh_date, 100.0)], 90.0)
+        self.assertIsInstance(failing, Rejection)
+        self.assertEqual(failing.reason_code, RR_BELOW_3)
+
+    def test_clearly_below_3_still_rejects_with_epsilon_tolerance(self):
+        df, spy, scan_date, sh_date = _boundary_base_frame()
+        older = df.index[1].date()
+        result_v1 = _run_boundary(df, scan_date, spy, 2.0, [(older, 110.0), (sh_date, 100.0)], 90.0)
+        self.assertIsInstance(result_v1, Rejection)
+        self.assertEqual(result_v1.reason_code, RR_BELOW_3)
+        result_v3 = _run_boundary_with_params(
+            df, scan_date, spy, 2.0, [(older, 110.0), (sh_date, 100.0)], 90.0, V3_PARAMS,
+        )
+        self.assertIsInstance(result_v3, Rejection)
+        self.assertEqual(result_v3.reason_code, RR_BELOW_3)
+
+
+class TestRejectionDiagnostics(unittest.TestCase):
+    """§8/§13: Rejection's optional diagnostics, filled only at the five
+    reason codes computed from those values."""
+
+    def test_diagnostics_filled_for_stop_cap_exceeded(self):
+        df, spy, scan_date, sh_date = _boundary_base_frame()
+        older = df.index[1].date()
+        result = _run_boundary(df, scan_date, spy, 1.9, [(older, 130.0), (sh_date, 100.0)], 90.0)
+        self.assertIsInstance(result, Rejection)
+        self.assertEqual(result.reason_code, STOP_CAP_EXCEEDED)
+        self.assertEqual(result.trigger, 100.0)
+        self.assertIsNotNone(result.stop)
+        self.assertIsNotNone(result.risk)
+        self.assertEqual(result.atr, 1.9)
+        self.assertIsNone(result.target)
+        self.assertIsNone(result.rr)
+
+    def test_diagnostics_filled_for_no_resistance(self):
+        close = _no_resistance_close()
+        df = _frame_from_close(close)
+        spy = _bull_spy(len(close), index=df.index)
+        scan_date = df.index[-1].date()
+        result = define_setup(df, scan_date, spy, params=V1_PARAMS)
+        self.assertIsInstance(result, Rejection)
+        self.assertEqual(result.reason_code, NO_RESISTANCE)
+        self.assertIsNotNone(result.trigger)
+        self.assertIsNotNone(result.stop)
+        self.assertIsNotNone(result.risk)
+        self.assertIsNotNone(result.atr)
+        self.assertIsNone(result.target)
+        self.assertIsNone(result.rr)
+
+    def test_diagnostics_filled_for_rr_below_3(self):
+        df, spy, scan_date, sh_date = _boundary_base_frame()
+        older = df.index[1].date()
+        result = _run_boundary(df, scan_date, spy, 2.0, [(older, 129.9), (sh_date, 100.0)], 90.0)
+        self.assertIsInstance(result, Rejection)
+        self.assertEqual(result.reason_code, RR_BELOW_3)
+        self.assertEqual(result.trigger, 100.0)
+        self.assertEqual(result.target, 129.9)
+        self.assertIsNotNone(result.risk)
+        self.assertIsNotNone(result.rr)
+        self.assertEqual(result.atr, 2.0)
+
+    def test_diagnostics_filled_for_extension_veto(self):
+        df, spy, scan_date, sh_date = _boundary_base_frame()
+        older = df.index[1].date()
+        result = _run_boundary(df, scan_date, spy, 2.0, [(older, 130.0), (sh_date, 100.0)], 83.9)
+        self.assertIsInstance(result, Rejection)
+        self.assertEqual(result.reason_code, EXTENSION_VETO)
+        self.assertIsNotNone(result.trigger)
+        self.assertIsNotNone(result.stop)
+        self.assertIsNotNone(result.target)
+        self.assertIsNotNone(result.risk)
+        self.assertIsNotNone(result.rr)
+        self.assertIsNotNone(result.atr)
+
+    def test_diagnostics_filled_for_regime_veto(self):
+        close = _golden_close()
+        df = _frame_from_close(close)
+        scan_date = df.index[-1].date()
+        declining_spy = _frame_from_close(np.linspace(420.0, 350.0, len(close)), index=df.index)
+        result = define_setup(df, scan_date, declining_spy)
+        self.assertIsInstance(result, Rejection)
+        self.assertEqual(result.reason_code, REGIME_VETO)
+        self.assertIsNotNone(result.trigger)
+        self.assertIsNotNone(result.stop)
+        self.assertIsNotNone(result.target)
+        self.assertIsNotNone(result.risk)
+        self.assertIsNotNone(result.rr)
+        self.assertIsNotNone(result.atr)
+
+    def test_diagnostics_stay_none_for_earlier_reason_codes(self):
+        close = list(range(50, 250))
+        df = _frame_from_close(close)
+        spy = _bull_spy(len(close), index=df.index)
+        scan_date = df.index[-1].date()
+        result = define_setup(df, scan_date, spy)
+        self.assertIsInstance(result, Rejection)
+        self.assertEqual(result.reason_code, NO_SWING_STRUCTURE)
+        self.assertIsNone(result.trigger)
+        self.assertIsNone(result.stop)
+        self.assertIsNone(result.target)
+        self.assertIsNone(result.risk)
+        self.assertIsNone(result.rr)
+        self.assertIsNone(result.atr)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,12 @@ class CandidateRow:
     rr: float | None = None
     atr: float | None = None
     validity_end: date | None = None
+    # §8/§13, V3: "RESISTANCE" or "MEASURED_3R" for an accepted setup; None
+    # for every rejected row -- Rejection itself never carries this (a
+    # MEASURED_3R target can't reach RR_BELOW_3, so the only
+    # rejected-with-a-target cases are already unambiguously
+    # RESISTANCE-sourced).
+    target_source: str | None = None
     # Outcome fields -- populated only when compute_outcomes=True and the
     # setup was accepted. Stay None in counts-only mode (test-enforced).
     fill_date: date | None = None
@@ -196,6 +202,8 @@ def run_replay_core(
                     symbol=symbol, scan_date=scan_date, regime=outcome.regime,
                     accepted=False, reason_code=outcome.reason_code,
                     variant=variant,
+                    trigger=outcome.trigger, stop=outcome.stop, target=outcome.target,
+                    risk=outcome.risk, rr=outcome.rr, atr=outcome.atr,
                 ))
                 continue
 
@@ -218,6 +226,7 @@ def run_replay_core(
                 trigger=outcome.trigger, stop=outcome.stop, target=outcome.target,
                 risk=outcome.risk, rr=outcome.rr, atr=outcome.atr,
                 validity_end=outcome.validity_end,
+                target_source=outcome.target_source,
             )
 
             if compute_outcomes:

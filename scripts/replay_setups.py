@@ -63,7 +63,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from setups.frame_utils import normalize_frame  # noqa: E402
-from setups.params import OutcomeParams, SetupParams, V1_OUTCOME_PARAMS, V1_PARAMS  # noqa: E402
+from setups.params import OutcomeParams, SetupParams, V1_OUTCOME_PARAMS, V1_PARAMS, V3_PARAMS  # noqa: E402
 from setups.replay import CandidateRow, build_regime_by_date, run_replay_core  # noqa: E402
 from setups.universe import get_setup_universe  # noqa: E402
 
@@ -412,7 +412,7 @@ CREATE TABLE IF NOT EXISTS replay_candidates (
     setup_identity TEXT,
     sh_date TEXT, sh_price REAL, sl_date TEXT, sl_price REAL,
     trigger_price REAL, stop REAL, target REAL, risk REAL, rr REAL, atr REAL,
-    validity_end TEXT,
+    validity_end TEXT, target_source TEXT,
     fill_date TEXT, fill_price REAL, exit_date TEXT, exit_price REAL,
     first_barrier_hit TEXT, r_multiple REAL, mae_r REAL, mfe_r REAL,
     sessions_held INTEGER, resolved_date TEXT,
@@ -434,9 +434,23 @@ def open_results_db(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    _check_schema_compatible(conn)
     conn.executescript(_SCHEMA)
     conn.commit()
     return conn
+
+
+def _check_schema_compatible(conn: sqlite3.Connection) -> None:
+    """A results DB from before target_source existed has a
+    replay_candidates table that CREATE TABLE IF NOT EXISTS will never
+    retroactively alter -- caught here, at open time, with a clear
+    message, rather than failing obscurely on the first insert."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(replay_candidates)").fetchall()}
+    if columns and "target_source" not in columns:
+        raise RuntimeError(
+            "This results DB was created by an older version of this script and "
+            "is missing the replay_candidates.target_source column; use a new --output path."
+        )
 
 
 def _s(value):
@@ -451,7 +465,7 @@ def _row_to_db_tuple(run_id: int, bound: str, row: CandidateRow) -> tuple:
         1 if d["accepted"] else 0, d["reason_code"], identity,
         _s(d["sh_date"]), d["sh_price"], _s(d["sl_date"]), d["sl_price"],
         d["trigger"], d["stop"], d["target"], d["risk"], d["rr"], d["atr"],
-        _s(d["validity_end"]),
+        _s(d["validity_end"]), d["target_source"],
         _s(d["fill_date"]), d["fill_price"], _s(d["exit_date"]), d["exit_price"],
         d["first_barrier_hit"], d["r_multiple"], d["mae_r"], d["mfe_r"],
         d["sessions_held"], _s(d["resolved_date"]),
@@ -465,10 +479,10 @@ def write_candidate_rows(
         """INSERT OR REPLACE INTO replay_candidates (
             run_id, variant, bound, symbol, scan_date, regime, accepted, reason_code,
             setup_identity, sh_date, sh_price, sl_date, sl_price, trigger_price,
-            stop, target, risk, rr, atr, validity_end, fill_date, fill_price,
+            stop, target, risk, rr, atr, validity_end, target_source, fill_date, fill_price,
             exit_date, exit_price, first_barrier_hit, r_multiple, mae_r, mfe_r,
             sessions_held, resolved_date
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         [_row_to_db_tuple(run_id, bound, row) for row in rows],
     )
     if commit:
@@ -561,7 +575,7 @@ def resume_run(
         _refuse("variants", variants, json.loads(row["variants_json"]))
     expected_params = {v: asdict(p) for v, p in params_by_variant.items()}
     if json.loads(row["params_json"]) != expected_params:
-        _refuse("params (including V2)", expected_params, json.loads(row["params_json"]))
+        _refuse("params (including V2/V3)", expected_params, json.loads(row["params_json"]))
     if json.loads(row["outcome_params_json"]) != asdict(outcome_params):
         _refuse("outcome params / slippage", asdict(outcome_params), json.loads(row["outcome_params_json"]))
     return dict(row)
@@ -641,7 +655,8 @@ def summarize_counts_from_db(conn: sqlite3.Connection, run_id: int, variant: str
 
 
 def print_counts_only_report(variant: str, upper: dict, lower: dict) -> None:
-    print(f"--- Variant {variant} (outcome-blind) ---")
+    label = f"{variant} (PRIMARY)" if variant == "V3" else variant
+    print(f"--- Variant {label} (outcome-blind) ---")
     print(f"  UPPER bound (blocked until validity_end): "
           f"{upper['total_setups']} setups, {upper['total_symbols']} symbols, {upper['total_years']} years")
     print(f"  LOWER bound (blocked until validity_end + timeout_sessions): "
@@ -650,8 +665,9 @@ def print_counts_only_report(variant: str, upper: dict, lower: dict) -> None:
           f"(judged on the LOWER bound only)")
     for year in sorted(lower["reason_per_year"]):
         print(f"  {year} reason-code breakdown: {lower['reason_per_year'][year]}")
-    print("  V3 (measured-3R target) and V4 (highest-high-252 target) are NOT implemented -- "
-          "both would need a new TARGET_MODE in setups/definition.py / setups/params.py.")
+    if variant == "V3":
+        print("  V4 (highest-high-252 target) is NOT implemented -- would need a new "
+              "TARGET_MODE in setups/definition.py / setups/params.py.")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────
@@ -718,11 +734,12 @@ def main(
 
     outcome_params = replace(V1_OUTCOME_PARAMS, slippage_bps=args.slippage_bps)
     mode = "counts_only" if args.counts_only else "run_outcomes"
-    variants = ["V1", "V2"] if mode == "counts_only" else ["V1"]
-    params_by_variant = {
-        v: (V1_PARAMS if v == "V1" else replace(V1_PARAMS, swing_lookback_bars=120))
-        for v in variants
-    }
+    # V3 (measured-3R target) is primary (SETUP_SPEC.md §13) -- V1/V2 are
+    # sensitivity variants only, run in counts-only mode alongside it;
+    # --run-outcomes computes returns for V3 alone.
+    variants = ["V1", "V2", "V3"] if mode == "counts_only" else ["V3"]
+    _PARAMS_BY_VARIANT_NAME = {"V1": V1_PARAMS, "V2": replace(V1_PARAMS, swing_lookback_bars=120), "V3": V3_PARAMS}
+    params_by_variant = {v: _PARAMS_BY_VARIANT_NAME[v] for v in variants}
     fetch_end = resolve_fetch_end(end, mode)
 
     preregistration_hash = None

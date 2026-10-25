@@ -23,7 +23,7 @@ import pandas as pd
 from setups.calendar_utils import advance_us_trading_days
 from setups.definition import SetupDefinition
 from setups.frame_utils import normalize_frame
-from setups.params import OutcomeParams, V1_OUTCOME_PARAMS
+from setups.params import RR_EPSILON, OutcomeParams, V1_OUTCOME_PARAMS
 from setups.reason_codes import (
     BARRIER_STOP,
     BARRIER_TARGET,
@@ -285,7 +285,7 @@ def simulate_outcome(
 
     risk = fill_price - setup.stop
     rr = (setup.target - fill_price) / risk if risk > 0 else float("-inf")
-    if rr < params.min_rr:
+    if rr < params.min_rr - RR_EPSILON:
         # R:R gate checked BEFORE the same-session stop check: a session
         # that both gaps to a sub-min_rr fill price AND trades down
         # through the stop is CHASE_RR_BELOW_3 (never taken), not a loss.
