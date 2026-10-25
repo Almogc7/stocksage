@@ -46,6 +46,7 @@ from setups.replay import (  # noqa: E402
     SUPPRESSED,
     CandidateRow,
     _max_possible_resolution_date,
+    build_regime_by_date,
     run_replay_core,
 )
 
@@ -1254,6 +1255,71 @@ class TestManifestIdempotencyAndTransactionSafety(unittest.TestCase):
         self.assertEqual(candidate_count, 0)
         self.assertEqual(manifest_count, 0)
         self.assertEqual(progress_count, 0)
+
+
+class TestRegimeByDatePrecomputed(unittest.TestCase):
+    """Code-review fix: run_replay_core()'s optional regime_by_date lets a
+    caller that invokes it repeatedly for the same spy_df/scan_dates
+    (scripts/replay_setups.py, once per symbol x variant x bound) build
+    setups.replay.build_regime_by_date() a single time and pass it in."""
+
+    def test_precomputed_regime_by_date_gives_identical_results(self):
+        frames, spy, df = _golden_frames(extra_flat_sessions=2)
+        scan_dates = _scan_dates_from(df, 0, 2)
+        without = run_replay_core(frames, spy, scan_dates, params=SMALL_WINDOW_PARAMS)
+        regime_by_date = build_regime_by_date(spy, scan_dates)
+        with_precomputed = run_replay_core(
+            frames, spy, scan_dates, params=SMALL_WINDOW_PARAMS, regime_by_date=regime_by_date,
+        )
+        self.assertEqual(without, with_precomputed)
+
+    def test_accepted_row_regime_equals_the_precomputed_dict_value_for_that_date(self):
+        frames, spy, df = _golden_frames()
+        scan_date = df.index[-1].date()
+        regime_by_date = build_regime_by_date(spy, [scan_date])
+        rows = run_replay_core(frames, spy, [scan_date], params=V1_PARAMS, regime_by_date=regime_by_date)
+        self.assertTrue(rows[0].accepted)
+        self.assertEqual(rows[0].regime, regime_by_date[scan_date])
+
+    def test_corrupting_spy_bars_after_date_d_leaves_dict_values_for_earlier_dates_identical(self):
+        frames, spy, df = _golden_frames(extra_flat_sessions=3)
+        scan_dates = _scan_dates_from(df, 0, 3)
+        d = scan_dates[1]
+        baseline = build_regime_by_date(spy, scan_dates)
+
+        spy_dates = [ts.date() if hasattr(ts, "date") else ts for ts in spy.index]
+        corrupted_close = list(spy["close"])
+        for i, sd in enumerate(spy_dates):
+            if sd > d:
+                corrupted_close[i] = 999999.0
+        corrupted_spy = spy.copy()
+        corrupted_spy["close"] = corrupted_close
+        corrupted_spy["high"] = [c + 1.0 for c in corrupted_close]
+        corrupted_spy["low"] = [c - 1.0 for c in corrupted_close]
+        corrupted = build_regime_by_date(corrupted_spy, scan_dates)
+
+        for sd in scan_dates:
+            if sd <= d:
+                self.assertEqual(corrupted[sd], baseline[sd], f"date {sd}")
+
+
+class TestRegimeByDateBuiltOnceInMain(unittest.TestCase):
+
+    def test_main_builds_regime_by_date_exactly_once(self):
+        from unittest.mock import patch
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file = out_dir / "symbols.txt"
+        symbols_file.write_text("AAA\nBBB\n")
+        frames = {s: _fixed_frame("2026-05-01", "2026-06-10", 100.0) for s in ("AAA", "BBB")}
+        frames["SPY"] = SPY_WIDE
+        argv = [
+            "--symbols-file", str(symbols_file), "--start", "2026-06-01", "--end", "2026-06-05",
+            "--output", str(out_dir / "run.db"), "--cache-dir", str(out_dir / "cache"), "--counts-only",
+        ]
+        with patch("replay_setups.build_regime_by_date", wraps=rs.build_regime_by_date) as mocked:
+            rc = rs.main(argv, downloader=_fake_downloader(frames))
+        self.assertEqual(rc, 0)
+        self.assertEqual(mocked.call_count, 1)
 
 
 if __name__ == "__main__":

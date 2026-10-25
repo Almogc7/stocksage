@@ -64,7 +64,7 @@ sys.path.insert(0, str(ROOT))
 
 from setups.frame_utils import normalize_frame  # noqa: E402
 from setups.params import OutcomeParams, SetupParams, V1_OUTCOME_PARAMS, V1_PARAMS  # noqa: E402
-from setups.replay import CandidateRow, run_replay_core  # noqa: E402
+from setups.replay import CandidateRow, build_regime_by_date, run_replay_core  # noqa: E402
 from setups.universe import get_setup_universe  # noqa: E402
 
 PREREGISTRATION_FILE = "docs/PREREGISTRATION_SETUPS_V1.md"
@@ -580,7 +580,7 @@ def complete_run(conn: sqlite3.Connection, run_id: int) -> None:
 def process_symbol(
     symbol: str, df: pd.DataFrame | None, spy_df: pd.DataFrame, scan_dates: list[date],
     params: SetupParams, outcome_params: OutcomeParams, compute_outcomes: bool,
-    counts_only_block_extra_sessions: int, variant: str,
+    counts_only_block_extra_sessions: int, variant: str, regime_by_date: dict | None = None,
 ) -> list[CandidateRow]:
     if df is None:
         return [
@@ -592,7 +592,7 @@ def process_symbol(
         {symbol: df}, spy_df, scan_dates, params=params, outcome_params=outcome_params,
         compute_outcomes=compute_outcomes,
         counts_only_block_extra_sessions=counts_only_block_extra_sessions,
-        variant=variant,
+        variant=variant, regime_by_date=regime_by_date,
     )
 
 
@@ -773,6 +773,11 @@ def main(
             return 1
 
         scan_dates = build_scan_dates(spy_df, start, end)
+        # Built ONCE, shared across every symbol x variant x bound call
+        # below -- regime depends only on spy_df + scan_date, so without
+        # this every one of those calls would otherwise silently rebuild
+        # it from scratch.
+        regime_by_date = build_regime_by_date(spy_df, scan_dates)
 
         # Download in chunks up front, for every pending symbol at once --
         # the per-symbol loop below only ever reads from the cache.
@@ -797,14 +802,15 @@ def main(
                 params = params_by_variant[variant]
                 if mode == "run_outcomes":
                     rows = process_symbol(symbol, df, spy_df, scan_dates, params, outcome_params,
-                                           True, 0, variant)
+                                           True, 0, variant, regime_by_date=regime_by_date)
                     write_candidate_rows(conn, run_id, NA_BOUND, rows, commit=False)
                 else:
                     upper_rows = process_symbol(symbol, df, spy_df, scan_dates, params, outcome_params,
-                                                 False, 0, variant)
+                                                 False, 0, variant, regime_by_date=regime_by_date)
                     write_candidate_rows(conn, run_id, UPPER, upper_rows, commit=False)
                     lower_rows = process_symbol(symbol, df, spy_df, scan_dates, params, outcome_params,
-                                                 False, outcome_params.timeout_sessions, variant)
+                                                 False, outcome_params.timeout_sessions, variant,
+                                                 regime_by_date=regime_by_date)
                     write_candidate_rows(conn, run_id, LOWER, lower_rows, commit=False)
 
             mark_symbol_done(conn, run_id, symbol, commit=False)

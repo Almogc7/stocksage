@@ -117,6 +117,17 @@ def _max_possible_resolution_date(
     return setup.validity_end
 
 
+def build_regime_by_date(spy_df: pd.DataFrame, scan_dates: list[date]) -> dict:
+    """Regime depends only on spy_df + scan_date, never on the symbol, the
+    variant, or the bound -- computed once per date here (each date sees
+    only SPY bars up to that date, via _compute_regime_for_date's own
+    truncate_to_date call) so a caller that will invoke run_replay_core
+    more than once for the same spy_df/scan_dates (e.g. once per symbol,
+    per variant, per bound) can build this a single time and pass it in,
+    instead of every call silently recomputing it from scratch."""
+    return {scan_date: _compute_regime_for_date(spy_df, scan_date) for scan_date in scan_dates}
+
+
 def run_replay_core(
     frames: dict[str, pd.DataFrame],
     spy_df: pd.DataFrame,
@@ -126,6 +137,7 @@ def run_replay_core(
     compute_outcomes: bool = False,
     counts_only_block_extra_sessions: int = 0,
     variant: str = "V1",
+    regime_by_date: dict | None = None,
 ) -> list[CandidateRow]:
     """Deterministic: symbols processed in sorted order, scan_dates in the
     given (assumed-ascending) order.
@@ -142,11 +154,16 @@ def run_replay_core(
     compute_outcomes=True: simulate_outcome() is called for every accepted
     setup; blocked_until = result.resolved_date, falling back to
     _max_possible_resolution_date() when that's None.
+
+    regime_by_date: optional precomputed build_regime_by_date() result.
+    None (every direct caller and existing test) builds it internally,
+    exactly as before -- unchanged behavior. A caller that invokes this
+    function repeatedly for the same spy_df/scan_dates (scripts/
+    replay_setups.py, once per symbol x variant x bound) builds it once
+    and passes it in here, used as-is.
     """
-    # Regime depends only on spy_df + scan_date, never on the symbol --
-    # computed once per date here and reused for every symbol, instead of
-    # recomputing it per symbol per date.
-    regime_by_date = {scan_date: _compute_regime_for_date(spy_df, scan_date) for scan_date in scan_dates}
+    if regime_by_date is None:
+        regime_by_date = build_regime_by_date(spy_df, scan_dates)
 
     rows: list[CandidateRow] = []
     for symbol in sorted(frames.keys()):
