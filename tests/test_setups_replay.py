@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from setups.calendar_utils import advance_us_trading_days  # noqa: E402
 from setups.definition import SetupDefinition  # noqa: E402
 from setups.outcomes import simulate_outcome  # noqa: E402
-from setups.params import OutcomeParams, SetupParams, V1_OUTCOME_PARAMS, V1_PARAMS  # noqa: E402
+from setups.params import OutcomeParams, SetupParams, V1_OUTCOME_PARAMS, V1_PARAMS, V3_PARAMS  # noqa: E402
 from setups.reason_codes import (  # noqa: E402
     BARRIER_STOP,
     BARRIER_TARGET,
@@ -711,7 +711,7 @@ class TestCountsOnlyIO(unittest.TestCase):
             "GROUP BY run_id, variant, bound, symbol, scan_date HAVING c > 1"
         ).fetchall()
         conn.close()
-        self.assertEqual(variants, {"V1", "V2"})
+        self.assertEqual(variants, {"V1", "V2", "V3"})
         self.assertEqual(bounds, {"UPPER", "LOWER"})
         self.assertEqual(dupes, [])
 
@@ -813,9 +813,10 @@ class TestDeterminismAndResumeIO(unittest.TestCase):
         conn = rs.open_results_db(output_path)
         symbols = ["AAA", "BBB"]
         u_hash = rs.universe_hash(symbols)
-        params_by_variant = {"V1": rs.V1_PARAMS, "V2": replace(rs.V1_PARAMS, swing_lookback_bars=120)}
+        params_by_variant = {"V1": rs.V1_PARAMS, "V2": replace(rs.V1_PARAMS, swing_lookback_bars=120),
+                              "V3": rs.V3_PARAMS}
         run_id = rs.create_run(
-            conn, "counts_only", ["V1", "V2"], None, params_by_variant, rs.V1_OUTCOME_PARAMS,
+            conn, "counts_only", ["V1", "V2", "V3"], None, params_by_variant, rs.V1_OUTCOME_PARAMS,
             u_hash, date(2026, 6, 1), date(2026, 6, 5), date(2026, 6, 5), {}, None,
         )
         rs.mark_symbol_done(conn, run_id, "AAA")
@@ -949,9 +950,10 @@ class TestDeterminismAndResumeIO(unittest.TestCase):
         conn = rs.open_results_db(out_dir2 / "run.db")
         symbols = ["AAA", "BBB"]
         u_hash = rs.universe_hash(symbols)
-        params_by_variant = {"V1": rs.V1_PARAMS, "V2": replace(rs.V1_PARAMS, swing_lookback_bars=120)}
+        params_by_variant = {"V1": rs.V1_PARAMS, "V2": replace(rs.V1_PARAMS, swing_lookback_bars=120),
+                              "V3": rs.V3_PARAMS}
         run_id = rs.create_run(
-            conn, "counts_only", ["V1", "V2"], None, params_by_variant, rs.V1_OUTCOME_PARAMS,
+            conn, "counts_only", ["V1", "V2", "V3"], None, params_by_variant, rs.V1_OUTCOME_PARAMS,
             u_hash, date(2026, 6, 1), date(2026, 6, 5), date(2026, 6, 5), {}, None,
         )
         # Pre-seed ALL of AAA's rows exactly as the one-transaction-per-symbol
@@ -1320,6 +1322,126 @@ class TestRegimeByDateBuiltOnceInMain(unittest.TestCase):
             rc = rs.main(argv, downloader=_fake_downloader(frames))
         self.assertEqual(rc, 0)
         self.assertEqual(mocked.call_count, 1)
+
+
+class TestTargetSourceAndDiagnosticsPropagation(unittest.TestCase):
+    """§8/§13, V3: CandidateRow carries target_source (accepted rows) and
+    the Rejection diagnostics (trigger/stop/target/risk/rr/atr) when the
+    underlying Rejection has them."""
+
+    def test_accepted_row_carries_target_source(self):
+        frames, spy, df = _golden_frames()
+        scan_date = df.index[-1].date()
+        rows = run_replay_core(frames, spy, [scan_date], params=V1_PARAMS)
+        self.assertTrue(rows[0].accepted)
+        self.assertEqual(rows[0].target_source, "RESISTANCE")
+
+    def test_rejected_row_carries_diagnostics_when_available(self):
+        from unittest.mock import patch as mock_patch
+        from setups.definition import Rejection as DefRejection
+        rejection = DefRejection(
+            "RR_BELOW_3", "BULL", date(2026, 3, 2),
+            trigger=100.0, stop=95.0, target=110.0, risk=5.0, rr=2.0, atr=1.0,
+        )
+        frames, spy, df = _golden_frames()
+        scan_date = df.index[-1].date()
+        with mock_patch("setups.replay.evaluate_candidate") as mock_eval, \
+             mock_patch("setups.replay.define_setup", return_value=rejection):
+            mock_eval.return_value.passed = True
+            rows = run_replay_core(frames, spy, [scan_date], params=V1_PARAMS)
+        self.assertFalse(rows[0].accepted)
+        self.assertEqual(rows[0].reason_code, "RR_BELOW_3")
+        self.assertEqual(rows[0].trigger, 100.0)
+        self.assertEqual(rows[0].stop, 95.0)
+        self.assertEqual(rows[0].target, 110.0)
+        self.assertEqual(rows[0].risk, 5.0)
+        self.assertEqual(rows[0].rr, 2.0)
+        self.assertEqual(rows[0].atr, 1.0)
+        self.assertIsNone(rows[0].target_source)
+
+
+class TestV3InReplayScript(unittest.TestCase):
+
+    def _setup(self, out_dir, symbols=("AAA",)):
+        symbols_file = out_dir / "symbols.txt"
+        symbols_file.write_text("\n".join(symbols) + "\n")
+        frames = {s: _fixed_frame("2026-05-01", "2026-06-10", 100.0) for s in symbols}
+        frames["SPY"] = SPY_WIDE
+        return symbols_file, frames
+
+    def test_counts_only_runs_v1_v2_v3_and_v3_is_labelled_primary_in_report(self):
+        import contextlib
+        import io
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, frames = self._setup(out_dir)
+        argv = [
+            "--symbols-file", str(symbols_file), "--start", "2026-06-01", "--end", "2026-06-05",
+            "--output", str(out_dir / "run.db"), "--cache-dir", str(out_dir / "cache"), "--counts-only",
+        ]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = rs.main(argv, downloader=_fake_downloader(frames))
+        self.assertEqual(rc, 0)
+        output = buf.getvalue()
+        self.assertIn("V3 (PRIMARY)", output)
+        self.assertIn("Variant V1", output)
+        self.assertIn("Variant V2", output)
+        summary = rs.main.last_summary
+        self.assertEqual(set(summary.keys()), {"V1", "V2", "V3"})
+
+    def test_run_outcomes_runs_v3_only_and_records_it_in_variants_header(self):
+        repo = _make_temp_git_repo(with_preregistration=True, requirements_content="widgetlib==1.0.0\n")
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, _ = self._setup(out_dir)
+        output_path = out_dir / "run.db"
+        argv = [
+            "--symbols-file", str(symbols_file), "--start", "2026-06-01", "--end", "2026-06-03",
+            "--output", str(output_path), "--cache-dir", str(out_dir / "cache"), "--run-outcomes",
+        ]
+        downloader = _fake_downloader({
+            "AAA": _fixed_frame("2026-01-01", "2026-12-31", 100.0),
+            "SPY": _fixed_frame("2020-01-01", "2026-12-31", 400.0),
+        })
+        rc = rs.main(argv, downloader=downloader, repo_root=repo, version_lookup=lambda name: "1.0.0")
+        self.assertEqual(rc, 0)
+        conn = sqlite3.connect(output_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM replay_runs").fetchone()
+        variants_in_candidates = {r[0] for r in conn.execute("SELECT DISTINCT variant FROM replay_candidates")}
+        conn.close()
+        self.assertEqual(json.loads(row["variants_json"]), ["V3"])
+        self.assertEqual(variants_in_candidates, {"V3"})
+
+    def test_fresh_results_db_has_target_source_column(self):
+        out_dir = Path(tempfile.mkdtemp())
+        conn = rs.open_results_db(out_dir / "run.db")
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(replay_candidates)").fetchall()}
+        conn.close()
+        self.assertIn("target_source", columns)
+
+    def test_opening_an_older_results_db_missing_target_source_raises_clear_error(self):
+        out_dir = Path(tempfile.mkdtemp())
+        db_path = out_dir / "run.db"
+        # Hand-build an "old" schema: replay_candidates WITHOUT target_source.
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE replay_candidates (
+                run_id INTEGER NOT NULL, variant TEXT NOT NULL, bound TEXT NOT NULL,
+                symbol TEXT NOT NULL, scan_date TEXT NOT NULL, regime TEXT,
+                accepted INTEGER NOT NULL, reason_code TEXT, setup_identity TEXT,
+                sh_date TEXT, sh_price REAL, sl_date TEXT, sl_price REAL,
+                trigger_price REAL, stop REAL, target REAL, risk REAL, rr REAL, atr REAL,
+                validity_end TEXT, fill_date TEXT, fill_price REAL, exit_date TEXT,
+                exit_price REAL, first_barrier_hit TEXT, r_multiple REAL, mae_r REAL,
+                mfe_r REAL, sessions_held INTEGER, resolved_date TEXT,
+                UNIQUE(run_id, variant, bound, symbol, scan_date)
+            )
+        """)
+        conn.commit()
+        conn.close()
+        with self.assertRaises(RuntimeError) as cm:
+            rs.open_results_db(db_path)
+        self.assertIn("target_source", str(cm.exception))
 
 
 if __name__ == "__main__":

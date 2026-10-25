@@ -15,7 +15,7 @@ import pandas as pd
 from analyzers.technical import calc_atr
 from setups.calendar_utils import advance_us_trading_days
 from setups.frame_utils import missing_required_columns, normalize_frame
-from setups.params import SetupParams, V1_PARAMS
+from setups.params import RR_EPSILON, SetupParams, V1_PARAMS
 from setups.reason_codes import (
     DATA_NOT_FINAL,
     EXTENSION_VETO,
@@ -50,6 +50,13 @@ class SetupDefinition:
     regime: str
     validity_end: date
     scan_date: date
+    # §8/§13, V3: which branch produced `target` -- "RESISTANCE" (the only
+    # value V1/V2 ever produce) or "MEASURED_3R" (trigger + min_rr * risk,
+    # only reachable when target_mode=TARGET_MODE_MEASURED_3R_IF_NO_RESISTANCE
+    # and no confirmed resistance exists above the trigger). Defaulted so
+    # every existing direct construction (e.g. make_setup() test helpers)
+    # stays valid unchanged.
+    target_source: str = "RESISTANCE"
 
 
 @dataclass
@@ -57,6 +64,16 @@ class Rejection:
     reason_code: str
     regime: str
     scan_date: date
+    # §8/§13, V3: optional diagnostics, filled only at the five reason
+    # codes computed from these values (STOP_CAP_EXCEEDED, NO_RESISTANCE,
+    # RR_BELOW_3, EXTENSION_VETO, REGIME_VETO) -- every earlier rejection
+    # stays at the defaults below, unchanged from before this field existed.
+    trigger: float | None = None
+    stop: float | None = None
+    target: float | None = None
+    risk: float | None = None
+    rr: float | None = None
+    atr: float | None = None
 
 
 def _position_of_date(df: pd.DataFrame, target_date: date) -> int:
@@ -218,19 +235,34 @@ def define_setup(
     risk = trigger - stop
     max_stop = min(params.stop_cap_pct_of_entry * trigger, params.stop_cap_atr_mult * atr)
     if risk > max_stop:
-        return Rejection(STOP_CAP_EXCEEDED, regime, scan_date)
+        return Rejection(STOP_CAP_EXCEEDED, regime, scan_date,
+                          trigger=trigger, stop=stop, risk=risk, atr=atr)
 
     # Step 9: target -- sourced from find_confirmed_swing_highs()'s own
-    # list (not calc_swing_levels()), V1/Option B only.
+    # list (not calc_swing_levels()), V1/Option B. V3 (§13, promoted to
+    # primary): if no confirmed resistance exists above the trigger, fall
+    # back to a measured-3R target instead of rejecting NO_RESISTANCE --
+    # identical to V1 whenever a confirmed resistance DOES exist.
     target_candidates = [price for _, price in confirmed_highs if price > trigger]
-    if not target_candidates:
-        return Rejection(NO_RESISTANCE, regime, scan_date)
-    target = min(target_candidates)
+    if target_candidates:
+        target = min(target_candidates)
+        target_source = "RESISTANCE"
+    elif params.target_mode == "MEASURED_3R_IF_NO_RESISTANCE":
+        target = trigger + params.min_rr * risk
+        target_source = "MEASURED_3R"
+    else:
+        return Rejection(NO_RESISTANCE, regime, scan_date,
+                          trigger=trigger, stop=stop, risk=risk, atr=atr)
 
-    # Step 10: 3:1 gate -- rr == min_rr exactly passes (strict "<" rejects).
-    rr = (target - trigger) / risk
-    if rr < params.min_rr:
-        return Rejection(RR_BELOW_3, regime, scan_date)
+    # Step 10: 3:1 gate -- rr == min_rr exactly passes (strict "<" rejects,
+    # with an epsilon tolerance against float drift). A MEASURED_3R target
+    # stores rr as exactly params.min_rr -- belt-and-suspenders with the
+    # epsilon, not a substitute for it, since RESISTANCE-sourced targets
+    # still go through the division-based computation below.
+    rr = params.min_rr if target_source == "MEASURED_3R" else (target - trigger) / risk
+    if rr < params.min_rr - RR_EPSILON:
+        return Rejection(RR_BELOW_3, regime, scan_date,
+                          trigger=trigger, stop=stop, target=target, risk=risk, rr=rr, atr=atr)
 
     # Step 11: extension veto -- unrounded SMA150, not check_sma150()'s
     # display-rounded field (same fix already applied to trend_filter.py).
@@ -238,12 +270,14 @@ def define_setup(
     if math.isnan(sma150_unrounded):
         return Rejection(INSUFFICIENT_HISTORY, regime, scan_date)
     if (current_close - sma150_unrounded) > params.extension_veto_atr * atr:
-        return Rejection(EXTENSION_VETO, regime, scan_date)
+        return Rejection(EXTENSION_VETO, regime, scan_date,
+                          trigger=trigger, stop=stop, target=target, risk=risk, rr=rr, atr=atr)
 
     # Step 12: regime veto -- checked last; the regime value itself was
     # already attached in step 2 regardless of this ordering.
     if regime != "BULL":
-        return Rejection(REGIME_VETO, regime, scan_date)
+        return Rejection(REGIME_VETO, regime, scan_date,
+                          trigger=trigger, stop=stop, target=target, risk=risk, rr=rr, atr=atr)
 
     # Step 13: accept.
     validity_end = advance_us_trading_days(scan_date, params.validity_window_sessions)
@@ -261,4 +295,5 @@ def define_setup(
         regime=regime,
         validity_end=validity_end,
         scan_date=scan_date,
+        target_source=target_source,
     )
