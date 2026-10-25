@@ -1229,6 +1229,21 @@ end-to-end, at any time; the next new setup for that symbol can only be
 generated once the prior one has fully resolved (stop, target, timeout, or a
 pre-fill/post-fill invalidation reason code).
 
+**Scope note (outcome module PR): the replay harness writes to its own
+results file, not to the bot's live DB.** This section's additive-only DB
+logging tables (header/detail, following the
+`evaluation_runs`/`evaluation_run_changes` shape) are deferred to the
+"wire it up" rollout step (§14, step 4+). The new outcome module
+(`setups/outcomes.py`) only computes an in-memory result and returns it —
+it opens no DB connection, defines no schema, and writes nowhere.
+
+**Scope note: a target touched on the fill session itself is never
+credited.** The outcome module's result carries a diagnostic-only
+`target_touched_on_fill_session` flag (true when that session's high
+reached `target` and its low did not breach `stop`), but the trade is
+still not exited there — this is a conservative, stated rule, not an
+oversight.
+
 ---
 
 ## 13. Evaluation plan outline

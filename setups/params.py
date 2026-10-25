@@ -105,3 +105,27 @@ class SetupParams:
 
 
 V1_PARAMS = SetupParams()
+
+
+# ── Outcome simulation (§6, §12) -- reasoned defaults for V1 ───────────────
+
+# §12: 10 bps slippage each way, settled 2026-10-22.
+SLIPPAGE_BPS = 10.0
+
+# §12: 30-session hold horizon (distinct from populate_outcomes.py's own
+# HORIZON_DAYS=10 -- that module is not touched, per §12).
+TIMEOUT_SESSIONS = 30
+
+
+@dataclass(frozen=True)
+class OutcomeParams:
+    """Bundles setup-outcome-simulation reasoned defaults for
+    simulate_outcome() (setups/outcomes.py). min_rr reuses §8's MIN_RR
+    constant directly -- it is the same 3:1 gate, just recomputed at the
+    real fill price instead of at setup-definition time (§6)."""
+    min_rr: float = MIN_RR
+    slippage_bps: float = SLIPPAGE_BPS
+    timeout_sessions: int = TIMEOUT_SESSIONS
+
+
+V1_OUTCOME_PARAMS = OutcomeParams()
