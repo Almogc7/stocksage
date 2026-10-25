@@ -1500,6 +1500,35 @@ Each PR merged **outside US market hours** (not between 9:30-16:00 ET),
 matching the spirit of the existing watchlist-apply guard's concurrency
 caution, applied here to deployment timing instead of DB writes.
 
+**Scope note (replay harness PR): split between a pure core and I/O, per
+§13's own code-reuse rule.** `setups/replay.py` is the pure core (no
+network, no file I/O, no DB) — given `{symbol: DataFrame}`, SPY's frame, a
+list of scan dates, and `SetupParams`, it runs `evaluate_candidate()` then
+`define_setup()` (and, when asked, `simulate_outcome()`) per symbol per
+date and returns candidate rows; it also owns the one-open-setup-per-symbol
+suppression and a permanent per-symbol dedupe on `(symbol, sh_date,
+sl_date)` identity. `scripts/replay_setups.py` is the I/O half: a
+read-only DB (or `--symbols-file`) universe, chunked yfinance downloads
+with retries and an on-disk per-symbol cache (for reproducibility despite
+`auto_adjust=True` retroactively rebasing historical prices on later
+ex-dividend events), and the results sqlite file (never the bot's own DB).
+`--counts-only` **is** milestone 5a above (outcome-blind, no gates).
+`--run-outcomes` implements milestone 5c's mechanism but stays refused
+until a human completes milestone 5b — `docs/PREREGISTRATION_SETUPS_V1.md`
+does not exist yet, and creating it is still out of scope for this PR.
+
+**Scope note: `OutcomeResult` gains `resolved_date`.** The outcome module
+(§12) now also returns the date as of which a setup/position is
+definitively closed — `exit_date` for a resolved trade, `fill_date` for
+`CHASE_RR_BELOW_3`, the breaching session for `INVALIDATED_BEFORE_FILL`,
+`validity_end` for `EXPIRED_UNFILLED`, and `None` for `DATA_GAP`/
+`OPEN_AT_END` (genuinely unresolved — the replay harness itself falls back
+to the latest date the position could *possibly* still be open: the
+setup's own `validity_end` if never filled, or `fill_date` plus
+`timeout_sessions` expected sessions if it was). This is what lets the
+replay harness's suppression logic know exactly when a symbol is free for
+a new setup, without re-deriving per-status logic of its own.
+
 ---
 
 ## 15. Open decisions for the owner
