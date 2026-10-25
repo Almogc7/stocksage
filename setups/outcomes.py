@@ -53,6 +53,13 @@ class OutcomeResult:
     # reached target and its low did not breach stop. The target is still
     # never credited on the fill session itself (conservative, stated rule).
     target_touched_on_fill_session: bool = False
+    # The date as of which this setup/position is DEFINITIVELY closed --
+    # lets a caller (e.g. a replay harness's one-open-setup-per-symbol
+    # suppression) know exactly when it's safe to consider a new setup for
+    # this symbol, without re-deriving per-status logic itself. None for
+    # DATA_GAP/OPEN_AT_END -- those two are genuinely unresolved; a data
+    # problem, not a trading conclusion.
+    resolved_date: date | None = None
 
 
 def _normalize_date(d) -> date:
@@ -257,7 +264,7 @@ def simulate_outcome(
             break
 
         if low <= setup.stop or close < setup.sl_price:
-            return OutcomeResult(status=INVALIDATED_BEFORE_FILL)
+            return OutcomeResult(status=INVALIDATED_BEFORE_FILL, resolved_date=expected_date)
 
     if fill_date is None:
         # Only a genuine EXPIRED_UNFILLED if the expected-session list
@@ -266,7 +273,7 @@ def simulate_outcome(
         # never actually confirmed the window elapsed.
         if not expected_pre_fill or expected_pre_fill[-1] < validity_end:
             return OutcomeResult(status=OPEN_AT_END)
-        return OutcomeResult(status=EXPIRED_UNFILLED)
+        return OutcomeResult(status=EXPIRED_UNFILLED, resolved_date=validity_end)
 
     # ---- fill (§6) ----
     fill_open = float(fill_row["open"])
@@ -287,6 +294,7 @@ def simulate_outcome(
             fill_date=fill_date,
             fill_price=fill_price,
             target_touched_on_fill_session=target_touched_on_fill_session,
+            resolved_date=fill_date,
         )
 
     if fill_low <= setup.stop:
@@ -303,6 +311,7 @@ def simulate_outcome(
             mfe_r=(fill_high - fill_price) / risk,
             sessions_held=1,
             target_touched_on_fill_session=target_touched_on_fill_session,
+            resolved_date=fill_date,
         )
 
     # ---- post-fill monitoring (§12) ----
@@ -352,6 +361,7 @@ def simulate_outcome(
                 r_multiple=_r_multiple(fill_price, exit_price, risk, slippage),
                 mae_r=mae_r, mfe_r=mfe_r, sessions_held=sessions_held,
                 target_touched_on_fill_session=target_touched_on_fill_session,
+                resolved_date=expected_date,
             )
 
         if high >= setup.target:
@@ -366,6 +376,7 @@ def simulate_outcome(
                 r_multiple=_r_multiple(fill_price, exit_price, risk, slippage),
                 mae_r=mae_r, mfe_r=mfe_r, sessions_held=sessions_held,
                 target_touched_on_fill_session=target_touched_on_fill_session,
+                resolved_date=expected_date,
             )
 
         if i == params.timeout_sessions:
@@ -378,6 +389,7 @@ def simulate_outcome(
                 r_multiple=_r_multiple(fill_price, exit_price, risk, slippage),
                 mae_r=mae_r, mfe_r=mfe_r, sessions_held=sessions_held,
                 target_touched_on_fill_session=target_touched_on_fill_session,
+                resolved_date=expected_date,
             )
 
     # Ran out of data before reaching resolution or the 30th expected
