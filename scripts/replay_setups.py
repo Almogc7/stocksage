@@ -62,7 +62,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from setups.frame_utils import normalize_frame  # noqa: E402
+from setups.frame_utils import drop_all_nan_ohlc_rows, normalize_frame  # noqa: E402
 from setups.params import OutcomeParams, SetupParams, V1_OUTCOME_PARAMS, V1_PARAMS, V3_PARAMS  # noqa: E402
 from setups.replay import CandidateRow, build_regime_by_date, run_replay_core  # noqa: E402
 from setups.universe import get_setup_universe  # noqa: E402
@@ -237,7 +237,16 @@ def normalize_multi_ticker_frame(raw: pd.DataFrame, symbols: list[str]) -> dict:
                 sub = raw
             sub = normalize_frame(sub)
             missing = {"open", "high", "low", "close"} - set(sub.columns)
-            if missing or sub.empty or sub[["open", "high", "low", "close"]].isna().all(axis=None):
+            if missing:
+                result[symbol] = None
+                continue
+            # Drop yfinance's all-NaN padding rows (a late-listed symbol
+            # gets one for every calendar date before it existed, for the
+            # whole requested range) BEFORE the emptiness check below --
+            # a symbol with genuinely no real data at all (every row was
+            # padding) correctly becomes None here, same as before.
+            sub = drop_all_nan_ohlc_rows(sub)
+            if sub.empty:
                 result[symbol] = None
             else:
                 result[symbol] = sub
@@ -311,7 +320,12 @@ def load_from_cache(cache_dir: Path, symbol: str, start: date, end: date) -> pd.
         return None
     if not (requested_start <= start and requested_end >= end):
         return None  # the cached fetch didn't cover what's being asked for now
-    return pd.read_csv(data_path, index_col=0, parse_dates=True)
+    df = pd.read_csv(data_path, index_col=0, parse_dates=True)
+    # Clean on load, never on save -- the cache file's bytes are left
+    # exactly as fetched (reproducible, inspectable), but a cache file
+    # written before this fix (or one that otherwise still has yfinance's
+    # all-NaN padding rows baked in) must still come back clean here.
+    return drop_all_nan_ohlc_rows(df)
 
 
 def save_to_cache(cache_dir: Path, symbol: str, df: pd.DataFrame, start: date, end: date) -> None:
@@ -696,6 +710,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--chunk-size", type=int, default=50)
     p.add_argument("--max-retries", type=int, default=3)
     p.add_argument("--slippage-bps", type=float, default=V1_OUTCOME_PARAMS.slippage_bps)
+    p.add_argument("--variants", default=None,
+                    help="Comma-separated subset of V1,V2,V3 to run. Default: V1,V2,V3 for "
+                         "--counts-only, V3 only for --run-outcomes.")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--counts-only", action="store_true")
     mode.add_argument("--run-outcomes", action="store_true")
@@ -735,10 +752,34 @@ def main(
     outcome_params = replace(V1_OUTCOME_PARAMS, slippage_bps=args.slippage_bps)
     mode = "counts_only" if args.counts_only else "run_outcomes"
     # V3 (measured-3R target) is primary (SETUP_SPEC.md §13) -- V1/V2 are
-    # sensitivity variants only, run in counts-only mode alongside it;
-    # --run-outcomes computes returns for V3 alone.
-    variants = ["V1", "V2", "V3"] if mode == "counts_only" else ["V3"]
+    # sensitivity variants only, run in counts-only mode alongside it by
+    # default; --run-outcomes computes returns for V3 alone by default.
+    # --variants overrides either default with an explicit subset.
+    _ALL_VARIANTS = ["V1", "V2", "V3"]
     _PARAMS_BY_VARIANT_NAME = {"V1": V1_PARAMS, "V2": replace(V1_PARAMS, swing_lookback_bars=120), "V3": V3_PARAMS}
+    if args.variants is not None:
+        requested = {v.strip().upper() for v in args.variants.split(",") if v.strip()}
+        unknown = requested - set(_ALL_VARIANTS)
+        if unknown:
+            print(f"FATAL: --variants: unknown variant(s) {sorted(unknown)}; "
+                  f"must be a subset of {_ALL_VARIANTS}", file=sys.stderr)
+            return 1
+        if not requested:
+            print("FATAL: --variants: empty list", file=sys.stderr)
+            return 1
+        variants = [v for v in _ALL_VARIANTS if v in requested]
+    else:
+        variants = _ALL_VARIANTS if mode == "counts_only" else ["V3"]
+
+    if mode == "run_outcomes" and variants != ["V3"]:
+        print(
+            f"FATAL: --run-outcomes only accepts --variants V3 (or the default) -- got "
+            f"{','.join(variants)}. Sensitivity runs of V1/V2 in outcome mode are not "
+            f"allowed until a separately pre-registered run names them.",
+            file=sys.stderr,
+        )
+        return 1
+
     params_by_variant = {v: _PARAMS_BY_VARIANT_NAME[v] for v in variants}
     fetch_end = resolve_fetch_end(end, mode)
 

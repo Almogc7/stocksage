@@ -81,12 +81,17 @@ class TestValidateScanData(unittest.TestCase):
         result = validate_scan_data(tz_df, expected)
         self.assertTrue(result.passed)
 
-    def test_missing_ohlcv_nan_close(self):
+    def test_all_close_nan_is_insufficient_history_not_missing_ohlcv(self):
+        """Deliberate behavior change (padded-row fix): history is now
+        counted as bars with a FINITE close, not raw row count -- a
+        whole-column-NaN close has zero real bars by that definition, so
+        it's INSUFFICIENT_HISTORY (the more fundamental problem), caught
+        at check (2), never reaching check (4)'s MISSING_OHLCV at all."""
         df = _good_df()
         df.loc[df.index, "close"] = np.nan
         result = validate_scan_data(df, df.index[-1].date())
         self.assertFalse(result.passed)
-        self.assertEqual(result.reason_code, MISSING_OHLCV)
+        self.assertEqual(result.reason_code, INSUFFICIENT_HISTORY)
 
     def test_missing_ohlcv_nan_in_last_bar_only(self):
         """A NaN in only the LAST bar's close (every earlier close valid)

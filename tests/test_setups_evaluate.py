@@ -13,8 +13,8 @@ from tests.fixtures import make_trending_df
 import services.watchlist_evaluator as watchlist_evaluator
 import db.database as db_database
 from setups.evaluate import evaluate_candidate
-from setups.params import DEFAULT_SECURITY_TYPE, LIQUIDITY_LOOKBACK_SESSIONS, _NON_STOCK_TYPES
-from setups.reason_codes import MISSING_OHLCV
+from setups.params import DEFAULT_SECURITY_TYPE, LIQUIDITY_LOOKBACK_SESSIONS, MIN_HISTORY_BARS, _NON_STOCK_TYPES
+from setups.reason_codes import INSUFFICIENT_HISTORY, MISSING_OHLCV, TREND_FILTER_FAILED
 
 
 class TestNoLookAheadProperty(unittest.TestCase):
@@ -79,6 +79,59 @@ class TestLiquidityWindowNanGuard(unittest.TestCase):
 
         self.assertFalse(result.passed)
         self.assertEqual(result.reason_code, MISSING_OHLCV)
+
+
+class TestPaddedRowsDoNotInflateHistory(unittest.TestCase):
+    """2026-10-25 padded-row fix: a multi-ticker yfinance download pads a
+    late-listed symbol with all-NaN rows for every date before it
+    existed, covering the whole requested range -- these must never
+    count as real history (setups/data_validation.py), and never let a
+    too-short real history fall through as a different, wrong rejection
+    (setups/trend_filter.py)."""
+
+    def test_padded_frame_short_of_min_history_bars_is_insufficient_history_never_trend_filter_failed(self):
+        n_real = 180  # short of MIN_HISTORY_BARS (220) in REAL bars
+        n_pad = 100
+        real = make_trending_df(n=n_real, seed=7)
+        pad_dates = pd.bdate_range(end=real.index[0] - pd.Timedelta(days=1), periods=n_pad)
+        pad = pd.DataFrame({col: np.nan for col in real.columns}, index=pad_dates)
+        padded = pd.concat([pad, real])
+        self.assertEqual(len(padded), n_real + n_pad)
+        self.assertGreaterEqual(len(padded), MIN_HISTORY_BARS)  # raw row count alone would pass
+
+        scan_date = padded.index[-1].date()
+        result = evaluate_candidate(padded, scan_date, scan_date)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason_code, INSUFFICIENT_HISTORY)
+        self.assertNotEqual(result.reason_code, TREND_FILTER_FAILED)
+
+    def test_padded_then_cleaned_matches_the_same_frame_never_padded(self):
+        """Once padding rows are dropped (the harness I/O boundary's
+        job), the result is identical to a frame that was never padded
+        in the first place -- the leading padding, while still present,
+        sits entirely before every lookback window evaluate_candidate()
+        ever reads relative to scan_date, so results already match even
+        without dropping; this pins that invariant explicitly."""
+        from setups.frame_utils import drop_all_nan_ohlc_rows
+
+        real = make_trending_df(n=260, seed=8)
+        pad_dates = pd.bdate_range(end=real.index[0] - pd.Timedelta(days=1), periods=50)
+        pad = pd.DataFrame({col: np.nan for col in real.columns}, index=pad_dates)
+        padded = pd.concat([pad, real])
+        scan_date = real.index[-1].date()
+
+        cleaned = drop_all_nan_ohlc_rows(padded)
+        pd.testing.assert_frame_equal(cleaned, real, check_names=False)
+
+        clean_result = evaluate_candidate(real, scan_date, scan_date)
+        padded_result = evaluate_candidate(padded, scan_date, scan_date)
+        cleaned_result = evaluate_candidate(cleaned, scan_date, scan_date)
+
+        self.assertEqual(clean_result.passed, padded_result.passed)
+        self.assertEqual(clean_result.reason_code, padded_result.reason_code)
+        self.assertEqual(clean_result.passed, cleaned_result.passed)
+        self.assertEqual(clean_result.reason_code, cleaned_result.reason_code)
 
 
 class TestFrameNormalization(unittest.TestCase):

@@ -43,8 +43,14 @@ def validate_scan_data(df: pd.DataFrame, expected_session_date: date) -> Validat
 
     # (2) INSUFFICIENT_HISTORY -- before the trend filter and before the
     # date check, so a short-history name is never misreported as
-    # TREND_FILTER_FAILED or DATA_NOT_FINAL.
-    if len(df) < MIN_HISTORY_BARS:
+    # TREND_FILTER_FAILED or DATA_NOT_FINAL. Counts bars with a FINITE
+    # close, not raw row count: a multi-ticker yfinance download pads a
+    # late-listed symbol with all-NaN rows before it existed, which must
+    # never count as real history. An empty truncated frame (scan_date
+    # before the symbol's first real bar) has zero real bars and is
+    # caught here too, before step (3) ever touches df.index[-1].
+    real_bars = int(df["close"].notna().sum()) if "close" in df.columns else 0
+    if real_bars < MIN_HISTORY_BARS:
         return ValidationResult(passed=False, reason_code=INSUFFICIENT_HISTORY)
 
     # (3) Exact last-bar-date equality (not the tolerant gap_days check
