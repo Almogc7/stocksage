@@ -42,3 +42,23 @@ def missing_required_columns(df: pd.DataFrame) -> set[str]:
     non-empty result as MISSING_OHLCV rather than letting a later stage
     raise KeyError."""
     return set(REQUIRED_COLUMNS) - set(df.columns)
+
+
+def drop_all_nan_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Drops any row where open/high/low/close are ALL NaN -- a genuinely
+    missing bar, not a partial data problem. yfinance's multi-ticker
+    downloads pad a late-listed symbol with rows like this for every
+    calendar date before the symbol actually existed, covering the whole
+    requested date range; left in place, these inflate every later stage's
+    row count (evaluate_candidate()'s MIN_HISTORY_BARS check in particular)
+    without being real history. A row with a real NaN in only SOME of the
+    four columns is left untouched -- that is a partial-data problem for
+    setups/data_validation.py's own MISSING_OHLCV checks to catch, not a
+    padding artifact. Applied wherever a frame enters the harness (a fresh
+    multi-ticker download, or a frame read back from the on-disk cache) --
+    never on every call to normalize_frame(), so the cost is paid once per
+    fetch/load, not once per scan date. Never mutates the input."""
+    cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
+    if not cols:
+        return df.copy()
+    return df.loc[~df[cols].isna().all(axis=1)].copy()

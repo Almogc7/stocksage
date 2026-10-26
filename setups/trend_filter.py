@@ -4,6 +4,8 @@ already-truncated frame -- this module does not truncate; evaluate.py owns
 """
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from analyzers.technical import _flatten, _sma200, check_sma150
@@ -46,9 +48,16 @@ def evaluate_trend_and_eligibility(
     # could flip a sub-0.00005 boundary case).
     sma150_series = df["close"].rolling(window=150).mean()
     sma150_today = float(sma150_series.iloc[-1])
+    # A padded (all-NaN-prefix) frame can have >=150 total rows while the
+    # trailing 150-bar window still spans the padding -- rolling().mean()
+    # then returns NaN, not None, and a bare "<=" comparison against NaN
+    # is always False in Python, which would otherwise fall through as a
+    # silent pass. Must reject, never fall through.
+    if math.isnan(sma150_today):
+        return FilterResult(passed=False, reason_code=TREND_FILTER_FAILED)
 
     sma200 = _sma200(df)
-    if sma200 is None or sma150_today <= sma200:
+    if sma200 is None or math.isnan(sma200) or sma150_today <= sma200:
         return FilterResult(passed=False, reason_code=TREND_FILTER_FAILED)
 
     idx_ago = -1 - SLOPE_LOOKBACK_SESSIONS

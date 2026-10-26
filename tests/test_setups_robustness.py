@@ -110,10 +110,17 @@ class TestEvaluateCandidateNeverRaises(unittest.TestCase):
                 self.assertTrue(hasattr(result, "passed"))
 
     def test_malformed_df_exact_reason_codes_where_spec_defines_one(self):
+        """"all_nan" and "object_garbage_strings" expect INSUFFICIENT_HISTORY,
+        not MISSING_OHLCV -- a deliberate behavior change (2026-10-25
+        padded-row fix): setups/data_validation.py now counts history as
+        bars with a FINITE close, not raw row count, so a whole-column
+        NaN/non-numeric close has zero real bars by that definition --
+        the more fundamental problem, caught at the INSUFFICIENT_HISTORY
+        check (2), never reaching MISSING_OHLCV's check (4) at all."""
         cases = _malformed_df_cases()
         expected = {
             "one_row": INSUFFICIENT_HISTORY,
-            "all_nan": MISSING_OHLCV,
+            "all_nan": INSUFFICIENT_HISTORY,
             "duplicate_index": MALFORMED_INDEX,
             "descending_index": MALFORMED_INDEX,
             "string_index": MALFORMED_INDEX,
@@ -123,7 +130,7 @@ class TestEvaluateCandidateNeverRaises(unittest.TestCase):
             "missing_close": MISSING_OHLCV,
             "missing_volume": MISSING_OHLCV,
             "below_minimum_history": INSUFFICIENT_HISTORY,
-            "object_garbage_strings": MISSING_OHLCV,
+            "object_garbage_strings": INSUFFICIENT_HISTORY,
         }
         for name, code in expected.items():
             with self.subTest(case=name):

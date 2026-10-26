@@ -111,6 +111,41 @@ class TestEvaluateTrendAndEligibility(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertEqual(result.reason_code, TREND_FILTER_FAILED)
 
+    def test_sma200_nan_is_rejected_not_a_silent_pass(self):
+        """analyzers.technical._sma200() can return NaN (not None) when
+        len(df)>=200 but the trailing 200-bar window itself still spans a
+        NaN gap (e.g. yfinance's multi-ticker padding rows). A bare
+        `sma150_today <= sma200` with sma200=NaN is always False in
+        Python, which would otherwise fall through as a silent pass --
+        must reject instead."""
+        df = make_rising_df(n=260)
+        with patch("setups.trend_filter._sma200", return_value=float("nan")):
+            result = evaluate_trend_and_eligibility(
+                df, avg_volume=_GOOD_VOLUME, avg_dollar_vol=_GOOD_DOLLAR_VOL
+            )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason_code, TREND_FILTER_FAILED)
+
+    def test_padded_frame_with_185_real_bars_is_rejected_not_a_crash_or_pass(self):
+        """100 all-NaN padding rows (a late-listed symbol's yfinance
+        padding) followed by 185 real bars -- short of the 150-bar
+        trailing window check (2026-10-25 padded-row fix) in no obvious
+        way crashes or silently passes; this isolates trend_filter.py's
+        own NaN-safety from setups/data_validation.py's separate
+        INSUFFICIENT_HISTORY gate (185 real bars alone would already be
+        caught there, upstream of this function in the real pipeline)."""
+        real = make_rising_df(n=185)
+        pad_dates = pd.bdate_range(end=real.index[0] - pd.Timedelta(days=1), periods=100)
+        pad = pd.DataFrame({col: float("nan") for col in real.columns}, index=pad_dates)
+        padded = pd.concat([pad, real])
+
+        result = evaluate_trend_and_eligibility(
+            padded, avg_volume=_GOOD_VOLUME, avg_dollar_vol=_GOOD_DOLLAR_VOL
+        )
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason_code, TREND_FILTER_FAILED)
+
     def test_evaluate_trend_and_eligibility_tolerates_missing_volume_column(self):
         """Not this module's own job to report MISSING_OHLCV (that's
         evaluate.py's normalize_frame()/missing_required_columns() gate,

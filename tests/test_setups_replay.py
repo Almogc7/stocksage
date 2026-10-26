@@ -757,6 +757,48 @@ class TestCountsOnlyIO(unittest.TestCase):
         self.assertEqual(row["last_date"], str(expected.index.max().date()))
         self.assertEqual(row["sha256"], __import__("hashlib").sha256(expected.to_csv().encode()).hexdigest())
 
+    def test_data_manifest_describes_the_cleaned_frame_when_input_is_padded(self):
+        """The fake downloader hands back a frame with yfinance-style
+        padding (bypassing normalize_multi_ticker_frame entirely, the way
+        a real multi-ticker download's split-per-symbol result would have
+        already been padded) -- the cache file on disk keeps those raw
+        bytes (clean on load, not on save), but the manifest -- built
+        from load_from_cache()'s cleaned return value -- must describe
+        only the real bars."""
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file = out_dir / "symbols.txt"
+        symbols_file.write_text("AAA\n")
+
+        pad_dates = pd.bdate_range(start="2026-04-01", periods=10)
+        real_dates = pd.bdate_range(start="2026-04-15", periods=20)
+        full_index = pad_dates.append(real_dates)
+        padded = pd.DataFrame(
+            {
+                "open": [float("nan")] * 10 + [100.0] * 20,
+                "high": [float("nan")] * 10 + [101.0] * 20,
+                "low": [float("nan")] * 10 + [99.0] * 20,
+                "close": [float("nan")] * 10 + [100.5] * 20,
+                "volume": [float("nan")] * 10 + [1_000_000.0] * 20,
+            },
+            index=full_index,
+        )
+        frames = {"AAA": padded, "SPY": SPY_WIDE}
+
+        rc = rs.main(self._argv(out_dir, symbols_file), downloader=_fake_downloader(frames))
+        self.assertEqual(rc, 0)
+
+        # The cache file's own bytes are left exactly as handed in (30 rows).
+        raw_cached = pd.read_csv(rs.cache_file(out_dir / "cache", "AAA"))
+        self.assertEqual(len(raw_cached), 30)
+
+        conn = sqlite3.connect(out_dir / "run.db")
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM replay_data_manifest WHERE symbol = 'AAA'").fetchone()
+        conn.close()
+        self.assertEqual(row["rows"], 20)  # real bars only, not 30
+        self.assertEqual(row["first_date"], str(real_dates[0].date()))
+        self.assertEqual(row["last_date"], str(real_dates[-1].date()))
+
 
 class TestDeterminismAndResumeIO(unittest.TestCase):
 
@@ -1067,6 +1109,24 @@ class TestChunkedDownloader(unittest.TestCase):
         self.assertIsNone(result["AAA"])
         self.assertIsNone(result["MISSING"])
 
+    def test_normalize_multi_ticker_frame_drops_padding_rows_but_keeps_real_ones(self):
+        """A late-listed symbol in a multi-ticker download is padded with
+        all-NaN rows for every date before it existed, covering the WHOLE
+        requested range (confirmed: a cached GEV frame had 384 of 1027
+        rows NaN, first valid 2024-03-27) -- these must be dropped here,
+        at the point a fresh download enters the harness."""
+        dates = pd.bdate_range(start="2026-05-01", periods=10)
+        columns = pd.MultiIndex.from_product([["AAA"], ["Open", "High", "Low", "Close", "Volume"]])
+        data = np.full((10, 5), np.nan)
+        data[6:] = np.tile([100.0, 101.0, 99.0, 100.5, 1_000_000.0], (4, 1))  # 4 real bars at the end
+        raw = pd.DataFrame(data, index=dates, columns=columns)
+
+        result = rs.normalize_multi_ticker_frame(raw, ["AAA"])
+
+        self.assertIsNotNone(result["AAA"])
+        self.assertEqual(len(result["AAA"]), 4)
+        self.assertTrue(result["AAA"]["close"].notna().all())
+
 
 class TestCacheRequestedRangeSemantics(unittest.TestCase):
     """Item 1 of the fix round: a cache hit is decided by the REQUESTED
@@ -1121,6 +1181,44 @@ class TestCacheRequestedRangeSemantics(unittest.TestCase):
         self.assertEqual(meta["requested_end"], "2026-06-10")
         self.assertIn("fetched_at", meta)
         self.assertEqual(meta["sha256"], hashlib.sha256(frame.to_csv().encode()).hexdigest())
+
+    def test_load_from_cache_cleans_padding_rows_even_from_an_old_cache_file(self):
+        """The cache file's own bytes are left alone (clean on load, not
+        on save) -- a cache file written BEFORE the padded-row fix (or by
+        any path that still saved un-cleaned data) must still come back
+        clean here, with no need to invalidate or rewrite it."""
+        out_dir = Path(tempfile.mkdtemp())
+        cache_dir = out_dir / "cache"
+        cache_dir.mkdir(parents=True)
+        start, end = date(2026, 5, 1), date(2026, 6, 10)
+
+        # Hand-build an "old" cache file: 5 padding rows (all-NaN) then
+        # 5 real rows, exactly as if yfinance's own padding had been
+        # saved to disk uncleaned.
+        pad_dates = pd.bdate_range(start="2026-04-20", periods=5)
+        real_dates = pd.bdate_range(start="2026-04-27", periods=5)
+        full_index = pad_dates.append(real_dates)
+        raw = pd.DataFrame(
+            {
+                "open": [float("nan")] * 5 + [100.0] * 5,
+                "high": [float("nan")] * 5 + [101.0] * 5,
+                "low": [float("nan")] * 5 + [99.0] * 5,
+                "close": [float("nan")] * 5 + [100.5] * 5,
+                "volume": [float("nan")] * 5 + [1_000_000.0] * 5,
+            },
+            index=full_index,
+        )
+        raw.to_csv(rs.cache_file(cache_dir, "AAA"))
+        rs.cache_sidecar_file(cache_dir, "AAA").write_text(json.dumps({
+            "requested_start": str(start), "requested_end": str(end),
+            "fetched_at": "2026-01-01T00:00:00+00:00", "sha256": "irrelevant-for-this-test",
+        }))
+
+        loaded = rs.load_from_cache(cache_dir, "AAA", start, end)
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(len(loaded), 5)
+        self.assertTrue(loaded["close"].notna().all())
 
     def test_main_with_cache_only_fails_listing_missing_symbols(self):
         out_dir = Path(tempfile.mkdtemp())
@@ -1442,6 +1540,84 @@ class TestV3InReplayScript(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             rs.open_results_db(db_path)
         self.assertIn("target_source", str(cm.exception))
+
+
+class TestVariantsFlag(unittest.TestCase):
+    """--variants (fix round item 5): an explicit comma-separated subset
+    of V1/V2/V3, overriding either mode's default list; recorded in
+    variants_json; resume refuses a different list."""
+
+    def _setup(self, out_dir, symbols=("AAA",)):
+        symbols_file = out_dir / "symbols.txt"
+        symbols_file.write_text("\n".join(symbols) + "\n")
+        frames = {s: _fixed_frame("2026-05-01", "2026-06-10", 100.0) for s in symbols}
+        frames["SPY"] = SPY_WIDE
+        return symbols_file, frames
+
+    def test_explicit_variants_subset_overrides_the_counts_only_default(self):
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, frames = self._setup(out_dir)
+        argv = [
+            "--symbols-file", str(symbols_file), "--start", "2026-06-01", "--end", "2026-06-05",
+            "--output", str(out_dir / "run.db"), "--cache-dir", str(out_dir / "cache"),
+            "--counts-only", "--variants", "V1,V3",
+        ]
+        rc = rs.main(argv, downloader=_fake_downloader(frames))
+        self.assertEqual(rc, 0)
+        conn = sqlite3.connect(out_dir / "run.db")
+        row = conn.execute("SELECT variants_json FROM replay_runs").fetchone()
+        variants_in_candidates = {r[0] for r in conn.execute("SELECT DISTINCT variant FROM replay_candidates")}
+        conn.close()
+        self.assertEqual(json.loads(row[0]), ["V1", "V3"])
+        self.assertEqual(variants_in_candidates, {"V1", "V3"})
+
+    def test_explicit_variants_accepts_any_order_and_whitespace(self):
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, frames = self._setup(out_dir)
+        argv = [
+            "--symbols-file", str(symbols_file), "--start", "2026-06-01", "--end", "2026-06-05",
+            "--output", str(out_dir / "run.db"), "--cache-dir", str(out_dir / "cache"),
+            "--counts-only", "--variants", " v3 , v1 ",
+        ]
+        rc = rs.main(argv, downloader=_fake_downloader(frames))
+        self.assertEqual(rc, 0)
+        conn = sqlite3.connect(out_dir / "run.db")
+        row = conn.execute("SELECT variants_json FROM replay_runs").fetchone()
+        conn.close()
+        self.assertEqual(json.loads(row[0]), ["V1", "V3"])  # canonical order, not input order
+
+    def test_unknown_variant_is_refused(self):
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, frames = self._setup(out_dir)
+        argv = [
+            "--symbols-file", str(symbols_file), "--start", "2026-06-01", "--end", "2026-06-05",
+            "--output", str(out_dir / "run.db"), "--cache-dir", str(out_dir / "cache"),
+            "--counts-only", "--variants", "V1,V9",
+        ]
+        rc = rs.main(argv, downloader=_fake_downloader(frames))
+        self.assertEqual(rc, 1)
+
+    def test_resume_refuses_a_different_variants_list(self):
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, frames = self._setup(out_dir)
+        output_path = out_dir / "run.db"
+        conn = rs.open_results_db(output_path)
+        symbols = ["AAA"]
+        u_hash = rs.universe_hash(symbols)
+        params_by_variant = {"V1": rs.V1_PARAMS, "V3": rs.V3_PARAMS}
+        run_id = rs.create_run(
+            conn, "counts_only", ["V1", "V3"], None, params_by_variant, rs.V1_OUTCOME_PARAMS,
+            u_hash, date(2026, 6, 1), date(2026, 6, 5), date(2026, 6, 5), {}, None,
+        )
+        conn.close()
+        argv = [
+            "--symbols-file", str(symbols_file), "--start", "2026-06-01", "--end", "2026-06-05",
+            "--output", str(output_path), "--cache-dir", str(out_dir / "cache"),
+            "--counts-only", "--variants", "V1,V2,V3",  # different from the recorded run's V1,V3
+            "--resume-run-id", str(run_id),
+        ]
+        with self.assertRaises(RuntimeError):
+            rs.main(argv, downloader=_fake_downloader(frames))
 
 
 if __name__ == "__main__":

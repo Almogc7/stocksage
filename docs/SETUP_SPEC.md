@@ -265,6 +265,35 @@ the retry-once-then-skip handling above), rather than proceeding on a
 universe that's missing more than a tenth of its members — which could
 itself bias which setups get a chance to be found that night.
 
+**Defect found and fixed 2026-10-26, outcome-blind (no return/R-multiple
+was ever computed with the bad data) — padded rows inflated history
+counts.** A multi-ticker yfinance download pads a late-listed symbol with
+all-NaN rows for every calendar date before it actually existed, covering
+the *whole* requested range — confirmed directly against a cached frame:
+GEV had 1,027 total rows, 384 of them all-NaN (first valid bar
+2024-03-27); TLN had 179; NVDA had 0. `setups/data_validation.py`'s
+`INSUFFICIENT_HISTORY` check compared `len(df)` against `MIN_HISTORY_BARS`
+— raw row count, padding included — so a symbol with genuinely few real
+bars could still count as having "enough history" and reach the trend
+filter. Separately, `setups/trend_filter.py`'s own SMA150/SMA200
+comparisons used a bare `<=`/`>` against values that can be `NaN` (not
+`None`) when the trailing lookback window itself still spans padding —
+and a `NaN` comparison in Python is always `False`, which silently fell
+through as a **pass** rather than a rejection. **Fix:** (1) padding rows
+are dropped wherever a frame enters the harness — a fresh multi-ticker
+download, and a frame read back from the on-disk replay cache (the cache
+file's own bytes are left untouched; cleaning happens on every load, so
+an older cache file written before this fix still comes back clean); (2)
+`INSUFFICIENT_HISTORY` now counts bars with a **finite close**, not raw
+row count; (3) `trend_filter.py` gained explicit `isnan` checks on
+today's SMA150, SMA200, and the SMA150 value `SLOPE_LOOKBACK_SESSIONS`
+ago, so a `NaN` comparison can never fall through as a pass. This was
+found while running the outcome-blind feasibility count itself (§13) —
+before promoting V3, the same counts-only pass that produced the
+848/1,225 `NO_RESISTANCE`/`RR_BELOW_3` evidence — not from any
+outcome-level result, consistent with this section's own "outcome-blind
+until frozen" posture.
+
 ---
 
 ## 4. Trend and eligibility filter on completed bars
