@@ -54,11 +54,17 @@ def drop_all_nan_ohlc_rows(df: pd.DataFrame) -> pd.DataFrame:
     without being real history. A row with a real NaN in only SOME of the
     four columns is left untouched -- that is a partial-data problem for
     setups/data_validation.py's own MISSING_OHLCV checks to catch, not a
-    padding artifact. Applied wherever a frame enters the harness (a fresh
-    multi-ticker download, or a frame read back from the on-disk cache) --
-    never on every call to normalize_frame(), so the cost is paid once per
-    fetch/load, not once per scan date. Never mutates the input."""
-    cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
-    if not cols:
+    padding artifact. If ANY of the four columns is missing entirely (not
+    just NaN-valued -- an absent column), the frame is returned unchanged:
+    there's no way to tell "all four NaN" from "partially present" without
+    all four actually being there, and missing_required_columns()/
+    MISSING_OHLCV is the correct place to reject that shape, not this
+    function guessing which rows would have been padding. Applied wherever
+    a frame enters the harness (a fresh multi-ticker download, or a frame
+    read back from the on-disk cache) -- never on every call to
+    normalize_frame(), so the cost is paid once per fetch/load, not once
+    per scan date. Never mutates the input."""
+    required = ("open", "high", "low", "close")
+    if not all(col in df.columns for col in required):
         return df.copy()
-    return df.loc[~df[cols].isna().all(axis=1)].copy()
+    return df.loc[~df[list(required)].isna().all(axis=1)].copy()

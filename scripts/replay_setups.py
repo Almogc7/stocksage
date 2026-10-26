@@ -770,6 +770,16 @@ def main(
         variants = [v for v in _ALL_VARIANTS if v in requested]
     else:
         variants = _ALL_VARIANTS if mode == "counts_only" else ["V3"]
+
+    if mode == "run_outcomes" and variants != ["V3"]:
+        print(
+            f"FATAL: --run-outcomes only accepts --variants V3 (or the default) -- got "
+            f"{','.join(variants)}. Sensitivity runs of V1/V2 in outcome mode are not "
+            f"allowed until a separately pre-registered run names them.",
+            file=sys.stderr,
+        )
+        return 1
+
     params_by_variant = {v: _PARAMS_BY_VARIANT_NAME[v] for v in variants}
     fetch_end = resolve_fetch_end(end, mode)
 

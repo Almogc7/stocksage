@@ -72,6 +72,22 @@ class TestDropAllNanOhlcRows(unittest.TestCase):
         pd.testing.assert_frame_equal(result, df)
         self.assertIsNot(result, df)
 
+    def test_partial_ohlc_columns_present_returns_a_copy_unchanged_even_with_nan_rows(self):
+        """If any ONE of open/high/low/close is missing as a column (not
+        just NaN-valued), nothing is dropped -- there's no way to tell
+        "all four NaN" (padding) from "partially present" without all
+        four actually being there, so this is left for
+        missing_required_columns()/MISSING_OHLCV to reject instead."""
+        df = pd.DataFrame({
+            "open": [np.nan, 1.0], "high": [np.nan, 2.0], "low": [np.nan, 0.5],
+            # "close" missing entirely
+            "volume": [np.nan, 100.0],
+        })
+        result = drop_all_nan_ohlc_rows(df)
+        self.assertEqual(len(result), 2)  # the all-NaN-looking first row is kept
+        pd.testing.assert_frame_equal(result, df)
+        self.assertIsNot(result, df)
+
     def test_padded_frame_cleaned_matches_the_never_padded_frame_exactly(self):
         real = _real_frame(n=180)
         padded = _padded(real, n_pad=100)

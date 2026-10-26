@@ -1619,6 +1619,60 @@ class TestVariantsFlag(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             rs.main(argv, downloader=_fake_downloader(frames))
 
+    def test_run_outcomes_rejects_variants_v1_v2(self):
+        """--run-outcomes only ever runs V3 (the primary, 3R-by-construction
+        variant) -- V1/V2 sensitivity runs in outcome mode are not allowed
+        until a separately pre-registered run names them (fix round item 1).
+        The rejection happens before any file is touched, so no output.db
+        or cache-dir is ever created here."""
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, frames = self._setup(out_dir)
+        output_path = out_dir / "run.db"
+        argv = [
+            "--symbols-file", str(symbols_file), "--start", "2026-06-01", "--end", "2026-06-05",
+            "--output", str(output_path), "--cache-dir", str(out_dir / "cache"),
+            "--run-outcomes", "--variants", "V1,V2",
+        ]
+        rc = rs.main(argv, downloader=_fake_downloader(frames))
+        self.assertEqual(rc, 1)
+        self.assertFalse(output_path.exists())
+
+    def test_run_outcomes_rejects_variants_v1_v3(self):
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, frames = self._setup(out_dir)
+        output_path = out_dir / "run.db"
+        argv = [
+            "--symbols-file", str(symbols_file), "--start", "2026-06-01", "--end", "2026-06-05",
+            "--output", str(output_path), "--cache-dir", str(out_dir / "cache"),
+            "--run-outcomes", "--variants", "V1,V3",
+        ]
+        rc = rs.main(argv, downloader=_fake_downloader(frames))
+        self.assertEqual(rc, 1)
+        self.assertFalse(output_path.exists())
+
+    def test_run_outcomes_accepts_variants_v3(self):
+        """The one explicit --variants value --run-outcomes is allowed to
+        take -- same as its own default -- actually runs end to end."""
+        repo = _make_temp_git_repo(with_preregistration=True, requirements_content="widgetlib==1.0.0\n")
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, _ = self._setup(out_dir)
+        output_path = out_dir / "run.db"
+        argv = [
+            "--symbols-file", str(symbols_file), "--start", "2026-06-01", "--end", "2026-06-03",
+            "--output", str(output_path), "--cache-dir", str(out_dir / "cache"),
+            "--run-outcomes", "--variants", "V3",
+        ]
+        downloader = _fake_downloader({
+            "AAA": _fixed_frame("2026-01-01", "2026-12-31", 100.0),
+            "SPY": _fixed_frame("2020-01-01", "2026-12-31", 400.0),
+        })
+        rc = rs.main(argv, downloader=downloader, repo_root=repo, version_lookup=lambda name: "1.0.0")
+        self.assertEqual(rc, 0)
+        conn = sqlite3.connect(output_path)
+        row = conn.execute("SELECT variants_json FROM replay_runs").fetchone()
+        conn.close()
+        self.assertEqual(json.loads(row[0]), ["V3"])
+
 
 if __name__ == "__main__":
     unittest.main()

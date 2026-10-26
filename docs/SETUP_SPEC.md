@@ -286,8 +286,9 @@ file's own bytes are left untouched; cleaning happens on every load, so
 an older cache file written before this fix still comes back clean); (2)
 `INSUFFICIENT_HISTORY` now counts bars with a **finite close**, not raw
 row count; (3) `trend_filter.py` gained explicit `isnan` checks on
-today's SMA150, SMA200, and the SMA150 value `SLOPE_LOOKBACK_SESSIONS`
-ago, so a `NaN` comparison can never fall through as a pass. This was
+today's SMA150 and on SMA200 (the SMA150 value `SLOPE_LOOKBACK_SESSIONS`
+ago already had its own `pd.isna()` guard, predating this fix), so a
+`NaN` comparison can never fall through as a pass. This was
 found while running the outcome-blind feasibility count itself (§13) —
 before promoting V3, the same counts-only pass that produced the
 848/1,225 `NO_RESISTANCE`/`RR_BELOW_3` evidence — not from any
