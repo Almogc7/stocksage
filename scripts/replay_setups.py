@@ -53,6 +53,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -64,7 +65,10 @@ sys.path.insert(0, str(ROOT))
 
 from setups.frame_utils import drop_all_nan_ohlc_rows, normalize_frame  # noqa: E402
 from setups.params import OutcomeParams, SetupParams, V1_OUTCOME_PARAMS, V1_PARAMS, V3_PARAMS  # noqa: E402
-from setups.replay import CandidateRow, build_regime_by_date, run_replay_core  # noqa: E402
+from setups.replay import (  # noqa: E402
+    CandidateRow, build_regime_by_date, run_replay_core,
+    run_replay_core_counts_only_both_bounds,
+)
 from setups.universe import get_setup_universe  # noqa: E402
 
 PREREGISTRATION_FILE = "docs/PREREGISTRATION_SETUPS_V1.md"
@@ -412,7 +416,8 @@ CREATE TABLE IF NOT EXISTS replay_runs (
     fetch_end_date TEXT NOT NULL,
     library_versions_json TEXT,
     preregistration_file_hash TEXT,
-    status TEXT NOT NULL DEFAULT 'started'
+    status TEXT NOT NULL DEFAULT 'started',
+    workers INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS replay_candidates (
     run_id INTEGER NOT NULL,
@@ -450,8 +455,21 @@ def open_results_db(path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     _check_schema_compatible(conn)
     conn.executescript(_SCHEMA)
+    _migrate_replay_runs_workers_column(conn)
     conn.commit()
     return conn
+
+
+def _migrate_replay_runs_workers_column(conn: sqlite3.Connection) -> None:
+    """A results DB created before --workers existed has a replay_runs
+    table without the workers column -- CREATE TABLE IF NOT EXISTS never
+    retroactively alters an existing table, so add it here. Additive and
+    safe (matches db/database.py's migrate_db() convention): existing rows
+    default to workers=1, the same single-process behavior they actually
+    ran with."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(replay_runs)").fetchall()}
+    if columns and "workers" not in columns:
+        conn.execute("ALTER TABLE replay_runs ADD COLUMN workers INTEGER NOT NULL DEFAULT 1")
 
 
 def _check_schema_compatible(conn: sqlite3.Connection) -> None:
@@ -503,24 +521,37 @@ def write_candidate_rows(
         conn.commit()
 
 
+def _manifest_fields_from_frame(df: pd.DataFrame | None) -> dict:
+    """Extracted from write_manifest() so a worker process (which can't
+    share a sqlite3.Connection across the process boundary) can compute the
+    same fields and hand them back to the main process for the actual
+    INSERT via write_manifest_fields()."""
+    if df is None or df.empty:
+        return {"rows": 0, "first_date": None, "last_date": None, "sha256": None}
+    return {
+        "rows": len(df),
+        "first_date": str(df.index.min().date()),
+        "last_date": str(df.index.max().date()),
+        "sha256": hashlib.sha256(df.to_csv().encode()).hexdigest(),
+    }
+
+
+def write_manifest_fields(
+    conn: sqlite3.Connection, run_id: int, symbol: str, fields: dict, commit: bool = True,
+) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO replay_data_manifest (run_id, symbol, rows, first_date, last_date, sha256) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (run_id, symbol, fields["rows"], fields["first_date"], fields["last_date"], fields["sha256"]),
+    )
+    if commit:
+        conn.commit()
+
+
 def write_manifest(
     conn: sqlite3.Connection, run_id: int, symbol: str, df: pd.DataFrame | None, commit: bool = True,
 ) -> None:
-    if df is None or df.empty:
-        conn.execute(
-            "INSERT OR REPLACE INTO replay_data_manifest (run_id, symbol, rows, first_date, last_date, sha256) "
-            "VALUES (?, ?, 0, NULL, NULL, NULL)",
-            (run_id, symbol),
-        )
-    else:
-        sha = hashlib.sha256(df.to_csv().encode()).hexdigest()
-        conn.execute(
-            "INSERT OR REPLACE INTO replay_data_manifest (run_id, symbol, rows, first_date, last_date, sha256) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (run_id, symbol, len(df), str(df.index.min().date()), str(df.index.max().date()), sha),
-        )
-    if commit:
-        conn.commit()
+    write_manifest_fields(conn, run_id, symbol, _manifest_fields_from_frame(df), commit=commit)
 
 
 def mark_symbol_done(conn: sqlite3.Connection, run_id: int, symbol: str, commit: bool = True) -> None:
@@ -545,19 +576,20 @@ def create_run(
     conn: sqlite3.Connection, mode: str, variants: list[str], git_commit: str | None,
     params_by_variant: dict, outcome_params: OutcomeParams, u_hash: str,
     start: date, end: date, fetch_end: date, library_versions: dict,
-    preregistration_hash: str | None,
+    preregistration_hash: str | None, workers: int = 1,
 ) -> int:
     cur = conn.execute(
         """INSERT INTO replay_runs (
             started_at, mode, variants_json, git_commit, params_json,
             outcome_params_json, universe_hash, start_date, end_date, fetch_end_date,
-            library_versions_json, preregistration_file_hash, status
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'started')""",
+            library_versions_json, preregistration_file_hash, status, workers
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'started',?)""",
         (
             datetime.now(timezone.utc).isoformat(), mode, json.dumps(variants), git_commit,
             json.dumps({v: asdict(p) for v, p in params_by_variant.items()}),
             json.dumps(asdict(outcome_params)), u_hash,
             str(start), str(end), str(fetch_end), json.dumps(library_versions), preregistration_hash,
+            workers,
         ),
     )
     conn.commit()
@@ -592,6 +624,10 @@ def resume_run(
         _refuse("params (including V2/V3)", expected_params, json.loads(row["params_json"]))
     if json.loads(row["outcome_params_json"]) != asdict(outcome_params):
         _refuse("outcome params / slippage", asdict(outcome_params), json.loads(row["outcome_params_json"]))
+    # NOTE: args.workers is intentionally excluded from this comparison --
+    # it is a performance knob (process-pool width), not a semantics knob.
+    # A resumed run may legally use a different --workers value than the
+    # run it's resuming; see docs/SETUP_SPEC.md section 14.
     return dict(row)
 
 
@@ -620,6 +656,28 @@ def process_symbol(
         {symbol: df}, spy_df, scan_dates, params=params, outcome_params=outcome_params,
         compute_outcomes=compute_outcomes,
         counts_only_block_extra_sessions=counts_only_block_extra_sessions,
+        variant=variant, regime_by_date=regime_by_date,
+    )
+
+
+def process_symbol_counts_only_both_bounds(
+    symbol: str, df: pd.DataFrame | None, spy_df: pd.DataFrame, scan_dates: list[date],
+    params: SetupParams, outcome_params: OutcomeParams, variant: str,
+    regime_by_date: dict | None = None,
+) -> tuple[list[CandidateRow], list[CandidateRow]]:
+    """Counts-only UPPER+LOWER for one symbol, computing
+    evaluate_candidate()/define_setup() once instead of once per bound.
+    Used by both the sequential main loop and _worker_process_symbol_variants
+    (so the --workers speed-up and this speed-up compose automatically)."""
+    if df is None:
+        rows = [
+            CandidateRow(symbol=symbol, scan_date=d, regime="UNKNOWN", accepted=False,
+                         reason_code="DATA_FETCH_FAILED", variant=variant)
+            for d in scan_dates
+        ]
+        return rows, [replace(r) for r in rows]
+    return run_replay_core_counts_only_both_bounds(
+        {symbol: df}, spy_df, scan_dates, params=params, outcome_params=outcome_params,
         variant=variant, regime_by_date=regime_by_date,
     )
 
@@ -684,6 +742,120 @@ def print_counts_only_report(variant: str, upper: dict, lower: dict) -> None:
               "TARGET_MODE in setups/definition.py / setups/params.py.")
 
 
+# ── Process pool (--workers) ─────────────────────────────────────────────
+# Each worker receives ONLY JSON-primitive data -- no DataFrame crosses the
+# process boundary inbound -- and loads its own symbol/SPY frames straight
+# from the on-disk cache via load_from_cache(), the same function the main
+# process uses. Workers never fetch (no downloader parameter exists to call)
+# and never write to the results DB; the main process does all writes, one
+# transaction per symbol, in sorted-symbol order, exactly as the sequential
+# path does.
+
+def _worker_process_symbol_variants(task: dict) -> dict:
+    """Top-level (module-level) function -- required for Windows `spawn`
+    safety: ProcessPoolExecutor must be able to pickle a reference to this
+    function by import path, which a closure or lambda cannot provide."""
+    symbol = task["symbol"]
+    cache_dir = Path(task["cache_dir"])
+    warmup_start = date.fromisoformat(task["warmup_start"])
+    fetch_end = date.fromisoformat(task["fetch_end"])
+    scan_dates = [date.fromisoformat(d) for d in task["scan_dates"]]
+    mode = task["mode"]
+    variants = task["variants"]
+    params_by_variant = {v: SetupParams(**p) for v, p in task["params_by_variant"].items()}
+    outcome_params = OutcomeParams(**task["outcome_params"])
+
+    df = load_from_cache(cache_dir, symbol, warmup_start, fetch_end)
+    # SPY is cached identically to any other symbol (same cache_file()/
+    # cache_sidecar_file() functions, symbol="SPY") -- not a separate path.
+    spy_df = load_from_cache(cache_dir, "SPY", warmup_start, fetch_end)
+    # regime_by_date is a pure function of (spy_df, scan_dates) only
+    # (setups/replay.py build_regime_by_date) -- recomputed here per worker
+    # rather than pickled through, since that's cheaper than pickling a
+    # DataFrame or a dict of comparable size across the process boundary.
+    regime_by_date = (
+        build_regime_by_date(spy_df, scan_dates) if spy_df is not None
+        else {d: "UNKNOWN" for d in scan_dates}
+    )
+
+    manifest_fields = _manifest_fields_from_frame(df)
+    rows_by_variant_bound: dict[str, dict[str, list]] = {}
+    for variant in variants:
+        params = params_by_variant[variant]
+        if mode == "run_outcomes":
+            rows = process_symbol(symbol, df, spy_df, scan_dates, params, outcome_params,
+                                   True, 0, variant, regime_by_date=regime_by_date)
+            rows_by_variant_bound[variant] = {NA_BOUND: rows}
+        else:
+            upper_rows, lower_rows = process_symbol_counts_only_both_bounds(
+                symbol, df, spy_df, scan_dates, params, outcome_params, variant,
+                regime_by_date=regime_by_date,
+            )
+            rows_by_variant_bound[variant] = {UPPER: upper_rows, LOWER: lower_rows}
+
+    return {"symbol": symbol, "manifest_fields": manifest_fields, "rows": rows_by_variant_bound}
+
+
+def _flush_symbol_result(conn: sqlite3.Connection, run_id: int, symbol: str, result: dict) -> None:
+    write_manifest_fields(conn, run_id, symbol, result["manifest_fields"], commit=False)
+    for _variant, by_bound in result["rows"].items():
+        for bound, rows in by_bound.items():
+            write_candidate_rows(conn, run_id, bound, rows, commit=False)
+    mark_symbol_done(conn, run_id, symbol, commit=False)
+    conn.commit()  # one transaction for this symbol's candidates + manifest + progress
+
+
+def _run_pool(
+    conn: sqlite3.Connection, run_id: int, pending: list, cache_dir: Path,
+    warmup_start: date, fetch_end: date, scan_dates: list, mode: str, variants: list,
+    params_by_variant: dict, outcome_params: OutcomeParams, workers: int, executor_factory,
+) -> None:
+    scan_dates_iso = [str(d) for d in scan_dates]
+    tasks = {
+        symbol: {
+            "symbol": symbol, "cache_dir": str(cache_dir),
+            "warmup_start": str(warmup_start), "fetch_end": str(fetch_end),
+            "scan_dates": scan_dates_iso, "mode": mode, "variants": variants,
+            "params_by_variant": {v: asdict(p) for v, p in params_by_variant.items()},
+            "outcome_params": asdict(outcome_params),
+        }
+        for symbol in pending
+    }
+
+    results: dict[str, dict] = {}
+    next_idx = 0
+    run_start_time = time.time()
+    last_flush_time = run_start_time
+
+    pool = executor_factory(max_workers=workers)
+    try:
+        futures = {pool.submit(_worker_process_symbol_variants, tasks[s]): s for s in pending}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            results[symbol] = future.result()  # re-raises a worker's exception HERE, in the main process
+
+            # Flush only the contiguous sorted-order prefix that's ready --
+            # preserves the exact sorted-symbol write order of the
+            # sequential path even though completion is out of order
+            # across workers.
+            while next_idx < len(pending) and pending[next_idx] in results:
+                sym = pending[next_idx]
+                _flush_symbol_result(conn, run_id, sym, results.pop(sym))
+                next_idx += 1
+                now = time.time()
+                elapsed = now - last_flush_time
+                last_flush_time = now
+                avg = (now - run_start_time) / next_idx
+                remaining = len(pending) - next_idx
+                print(f"[{next_idx}/{len(pending)}] {sym} done in {elapsed:.2f}s "
+                      f"(avg {avg:.2f}s/symbol, ~{avg * remaining:.0f}s remaining)")
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        pool.shutdown(wait=True)
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -713,6 +885,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--variants", default=None,
                     help="Comma-separated subset of V1,V2,V3 to run. Default: V1,V2,V3 for "
                          "--counts-only, V3 only for --run-outcomes.")
+    p.add_argument("--workers", type=int, default=1,
+                    help="Process-pool width for the CPU-bound process_symbol work. "
+                         "Default 1 = sequential, today's exact behavior. The on-disk "
+                         "cache is always fully pre-populated in the main process before "
+                         "workers start -- workers never fetch or write to the DB.")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--counts-only", action="store_true")
     mode.add_argument("--run-outcomes", action="store_true")
@@ -721,13 +898,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(
     argv=None, downloader=default_downloader, repo_root: Path | None = None,
-    version_lookup=importlib.metadata.version,
+    version_lookup=importlib.metadata.version, executor_factory=ProcessPoolExecutor,
 ) -> int:
     """repo_root is injectable (tests point it at a disposable temporary
     git repository, per the approved implementation conditions -- no test
     may read or modify this repo's own real working tree); real CLI
-    invocations leave it None and get this script's own repo auto-detected."""
+    invocations leave it None and get this script's own repo auto-detected.
+    executor_factory is injectable the same way, so tests can substitute a
+    synchronous fake pool instead of spawning real OS processes."""
     args = build_arg_parser().parse_args(argv)
+    if args.workers < 1:
+        print("FATAL: --workers must be >= 1", file=sys.stderr)
+        return 1
     start = date.fromisoformat(args.start)
     end = date.fromisoformat(args.end)
 
@@ -813,6 +995,7 @@ def main(
             run_id = create_run(
                 conn, mode, variants, git_commit, params_by_variant, outcome_params, u_hash,
                 start, end, fetch_end, library_versions, preregistration_hash,
+                workers=args.workers,
             )
 
         done = get_done_symbols(conn, run_id)
@@ -851,35 +1034,39 @@ def main(
         run_start_time = time.time()
         elapsed_total = 0.0
 
-        for idx, symbol in enumerate(pending, start=1):
-            symbol_start = time.time()
-            df = load_from_cache(cache_dir, symbol, warmup_start, fetch_end)
-            write_manifest(conn, run_id, symbol, df, commit=False)
+        if args.workers <= 1:
+            for idx, symbol in enumerate(pending, start=1):
+                symbol_start = time.time()
+                df = load_from_cache(cache_dir, symbol, warmup_start, fetch_end)
+                write_manifest(conn, run_id, symbol, df, commit=False)
 
-            for variant in variants:
-                params = params_by_variant[variant]
-                if mode == "run_outcomes":
-                    rows = process_symbol(symbol, df, spy_df, scan_dates, params, outcome_params,
-                                           True, 0, variant, regime_by_date=regime_by_date)
-                    write_candidate_rows(conn, run_id, NA_BOUND, rows, commit=False)
-                else:
-                    upper_rows = process_symbol(symbol, df, spy_df, scan_dates, params, outcome_params,
-                                                 False, 0, variant, regime_by_date=regime_by_date)
-                    write_candidate_rows(conn, run_id, UPPER, upper_rows, commit=False)
-                    lower_rows = process_symbol(symbol, df, spy_df, scan_dates, params, outcome_params,
-                                                 False, outcome_params.timeout_sessions, variant,
-                                                 regime_by_date=regime_by_date)
-                    write_candidate_rows(conn, run_id, LOWER, lower_rows, commit=False)
+                for variant in variants:
+                    params = params_by_variant[variant]
+                    if mode == "run_outcomes":
+                        rows = process_symbol(symbol, df, spy_df, scan_dates, params, outcome_params,
+                                               True, 0, variant, regime_by_date=regime_by_date)
+                        write_candidate_rows(conn, run_id, NA_BOUND, rows, commit=False)
+                    else:
+                        upper_rows, lower_rows = process_symbol_counts_only_both_bounds(
+                            symbol, df, spy_df, scan_dates, params, outcome_params, variant,
+                            regime_by_date=regime_by_date,
+                        )
+                        write_candidate_rows(conn, run_id, UPPER, upper_rows, commit=False)
+                        write_candidate_rows(conn, run_id, LOWER, lower_rows, commit=False)
 
-            mark_symbol_done(conn, run_id, symbol, commit=False)
-            conn.commit()  # one transaction for this symbol's candidates + manifest + progress
+                mark_symbol_done(conn, run_id, symbol, commit=False)
+                conn.commit()  # one transaction for this symbol's candidates + manifest + progress
 
-            elapsed = time.time() - symbol_start
-            elapsed_total += elapsed
-            avg = elapsed_total / idx
-            remaining = len(pending) - idx
-            print(f"[{idx}/{len(pending)}] {symbol} done in {elapsed:.2f}s "
-                  f"(avg {avg:.2f}s/symbol, ~{avg * remaining:.0f}s remaining)")
+                elapsed = time.time() - symbol_start
+                elapsed_total += elapsed
+                avg = elapsed_total / idx
+                remaining = len(pending) - idx
+                print(f"[{idx}/{len(pending)}] {symbol} done in {elapsed:.2f}s "
+                      f"(avg {avg:.2f}s/symbol, ~{avg * remaining:.0f}s remaining)")
+        else:
+            _run_pool(conn, run_id, pending, cache_dir, warmup_start, fetch_end, scan_dates,
+                      mode, variants, params_by_variant, outcome_params, args.workers,
+                      executor_factory)
 
         complete_run(conn, run_id)
         total_elapsed = time.time() - run_start_time

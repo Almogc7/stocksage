@@ -1579,6 +1579,33 @@ ex-dividend events), and the results sqlite file (never the bot's own DB).
 until a human completes milestone 5b — `docs/PREREGISTRATION_SETUPS_V1.md`
 does not exist yet, and creating it is still out of scope for this PR.
 
+**Scope note (replay harness speed PR): wall-clock-only, no rule/parameter/
+output change.** Two independent, stackable throughput fixes, both
+verified against the pre-change implementation as the equivalence oracle
+rather than trusted by inspection alone. (1) `--workers N`
+(`scripts/replay_setups.py`, default 1 = the original sequential
+behavior): a process pool where each worker loads its own symbol/SPY
+frames straight from the on-disk cache (never downloads, never writes to
+the results DB) and runs the same `process_symbol` code; the main process
+writes every symbol's rows in one transaction, in sorted-symbol order,
+regardless of the order workers finish in, preserving the existing
+checkpoint/resume semantics. `replay_runs.workers` records the pool width
+used but is deliberately excluded from `resume_run()`'s compatibility
+check — it is a performance knob, not a semantics knob. (2)
+`run_replay_core_counts_only_both_bounds()` (`setups/replay.py`): counts-
+only mode used to call `evaluate_candidate()`/`define_setup()` once per
+bound (UPPER, LOWER) per scan_date; since both functions are pure given
+`(df_full, scan_date, spy_df, params)` and never read the suppression
+state that differs between bounds, this now runs that expensive pair once
+per scan_date and replays the cheap suppression/dedupe bookkeeping twice.
+`run_replay_core()` itself is left unchanged and serves as the permanent
+regression oracle the two-bound-equivalence tests compare against.
+`scripts/compare_replay_runs.py` is a new read-only tool (not part of the
+replay harness itself) for diffing two results DBs' `replay_candidates`
+tables column-by-column, used as the hand-run acceptance check that a
+speed change produced byte-identical output against the baseline on the
+same cache.
+
 **Scope note: `OutcomeResult` gains `resolved_date`.** The outcome module
 (§12) now also returns the date as of which a setup/position is
 definitively closed — `exit_date` for a resolved trade, `fill_date` for
