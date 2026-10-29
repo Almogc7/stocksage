@@ -48,6 +48,7 @@ from setups.replay import (  # noqa: E402
     _max_possible_resolution_date,
     build_regime_by_date,
     run_replay_core,
+    run_replay_core_counts_only_both_bounds,
 )
 
 
@@ -370,6 +371,148 @@ class TestNoMutation(unittest.TestCase):
         for symbol, before in frames_before.items():
             pd.testing.assert_frame_equal(frames[symbol], before)
         pd.testing.assert_frame_equal(spy, spy_before)
+
+
+class TestCountsOnlySinglePassEquivalence(unittest.TestCase):
+    """run_replay_core_counts_only_both_bounds() computes
+    evaluate_candidate()/define_setup() once per (symbol, scan_date) and
+    derives both the UPPER and LOWER bound from that single pass, instead
+    of calling run_replay_core() twice (once per bound) as the sequential
+    I/O loop used to. These equivalence tests are PERMANENT regression
+    guards, not one-off migration checks: run_replay_core() is kept
+    unchanged specifically to serve as the independent oracle they compare
+    against, so any future change that makes the single-pass and two-pass
+    blocking logic diverge is caught here."""
+
+    def _two_pass(self, frames, spy, scan_dates, params, outcome_params, variant):
+        upper = run_replay_core(
+            frames, spy, scan_dates, params=params, outcome_params=outcome_params,
+            counts_only_block_extra_sessions=0, variant=variant,
+        )
+        lower = run_replay_core(
+            frames, spy, scan_dates, params=params, outcome_params=outcome_params,
+            counts_only_block_extra_sessions=outcome_params.timeout_sessions, variant=variant,
+        )
+        return upper, lower
+
+    def test_single_pass_matches_two_pass_normal_acceptance(self):
+        frames, spy, df = _golden_frames()
+        scan_dates = [df.index[-1].date()]
+        expected = self._two_pass(frames, spy, scan_dates, V1_PARAMS, V1_OUTCOME_PARAMS, "V1")
+        actual = run_replay_core_counts_only_both_bounds(
+            frames, spy, scan_dates, params=V1_PARAMS, outcome_params=V1_OUTCOME_PARAMS, variant="V1",
+        )
+        self.assertEqual(actual, expected)
+
+    def test_single_pass_matches_two_pass_under_suppression(self):
+        frames, spy, df = _golden_frames(extra_flat_sessions=6)
+        scan_dates = _scan_dates_from(df, 0, 6)
+        outcome_params = replace(V1_OUTCOME_PARAMS, timeout_sessions=2)
+        expected = self._two_pass(frames, spy, scan_dates, SMALL_WINDOW_PARAMS, outcome_params, "V1")
+        actual = run_replay_core_counts_only_both_bounds(
+            frames, spy, scan_dates, params=SMALL_WINDOW_PARAMS, outcome_params=outcome_params, variant="V1",
+        )
+        self.assertEqual(actual, expected)
+
+    def test_single_pass_matches_two_pass_with_duplicate_setups(self):
+        frames, spy, df = _golden_frames(extra_flat_sessions=3)
+        scan_dates = _scan_dates_from(df, 0, 3)
+        expected = self._two_pass(frames, spy, scan_dates, SMALL_WINDOW_PARAMS, V1_OUTCOME_PARAMS, "V1")
+        actual = run_replay_core_counts_only_both_bounds(
+            frames, spy, scan_dates, params=SMALL_WINDOW_PARAMS, outcome_params=V1_OUTCOME_PARAMS, variant="V1",
+        )
+        self.assertEqual(actual, expected)
+        # Confirm this fixture really does exercise DUPLICATE_SETUP, not
+        # just suppression -- otherwise the equivalence check is vacuous.
+        upper, _lower = actual
+        self.assertIn(DUPLICATE_SETUP, [r.reason_code for r in upper])
+
+    def test_single_pass_matches_two_pass_with_gapped_price_data(self):
+        frames, spy, df = _golden_frames(extra_flat_sessions=2)
+        scan_dates = _scan_dates_from(df, 0, 2)
+        corrupted_close = list(df["close"])
+        d_pos = len(GOLDEN_CLOSE) - 1 + 1
+        for i in range(d_pos + 1, len(corrupted_close)):
+            corrupted_close[i] = float("nan")
+        corrupted_df = _frame_from_close(corrupted_close, start="2026-01-01")
+        corrupted_frames = {"AAA": corrupted_df}
+        expected = self._two_pass(
+            corrupted_frames, spy, scan_dates, SMALL_WINDOW_PARAMS, V1_OUTCOME_PARAMS, "V1",
+        )
+        actual = run_replay_core_counts_only_both_bounds(
+            corrupted_frames, spy, scan_dates, params=SMALL_WINDOW_PARAMS,
+            outcome_params=V1_OUTCOME_PARAMS, variant="V1",
+        )
+        self.assertEqual(actual, expected)
+
+    def test_single_pass_calls_evaluate_candidate_and_define_setup_once_per_scan_date(self):
+        from unittest.mock import patch
+        frames, spy, df = _golden_frames(extra_flat_sessions=4)
+        scan_dates = _scan_dates_from(df, 0, 4)
+        with patch("setups.replay.evaluate_candidate", wraps=__import__(
+                "setups.evaluate", fromlist=["evaluate_candidate"]).evaluate_candidate) as mock_eval, \
+             patch("setups.replay.define_setup", wraps=__import__(
+                "setups.definition", fromlist=["define_setup"]).define_setup) as mock_define:
+            run_replay_core_counts_only_both_bounds(
+                frames, spy, scan_dates, params=SMALL_WINDOW_PARAMS, outcome_params=V1_OUTCOME_PARAMS,
+                variant="V1",
+            )
+        self.assertEqual(mock_eval.call_count, len(scan_dates))
+        # define_setup is only reached when eval passes -- at most once per
+        # scan_date, and this fixture passes eval every time.
+        self.assertEqual(mock_define.call_count, len(scan_dates))
+
+    def test_process_symbol_counts_only_both_bounds_handles_missing_data(self):
+        scan_dates = [date(2026, 6, 1), date(2026, 6, 2)]
+        upper, lower = rs.process_symbol_counts_only_both_bounds(
+            "ZZZ", None, None, scan_dates, V1_PARAMS, V1_OUTCOME_PARAMS, "V1",
+        )
+        self.assertEqual(len(upper), 2)
+        self.assertEqual(len(lower), 2)
+        for row in upper + lower:
+            self.assertFalse(row.accepted)
+            self.assertEqual(row.reason_code, "DATA_FETCH_FAILED")
+        self.assertIsNot(upper, lower)
+        upper[0].reason_code = "MUTATED"
+        self.assertEqual(lower[0].reason_code, "DATA_FETCH_FAILED")  # independent copies
+
+    def test_run_replay_core_counts_only_both_bounds_does_not_mutate_inputs(self):
+        frames, spy, df = _golden_frames(extra_flat_sessions=2)
+        scan_dates = _scan_dates_from(df, 0, 2)
+        frames_before = {k: v.copy(deep=True) for k, v in frames.items()}
+        spy_before = spy.copy(deep=True)
+
+        run_replay_core_counts_only_both_bounds(
+            frames, spy, scan_dates, params=SMALL_WINDOW_PARAMS, outcome_params=V1_OUTCOME_PARAMS,
+        )
+
+        for symbol, before in frames_before.items():
+            pd.testing.assert_frame_equal(frames[symbol], before)
+        pd.testing.assert_frame_equal(spy, spy_before)
+
+    def test_single_pass_malformed_frames_never_raise(self):
+        from tests.test_setups_robustness import _malformed_df_cases
+        spy = _frame_from_close(_spy_close(250))
+        scan_dates = [spy.index[-1].date()]
+        for name, df in _malformed_df_cases().items():
+            with self.subTest(case=name):
+                try:
+                    upper, lower = run_replay_core_counts_only_both_bounds(
+                        {"AAA": df}, spy, scan_dates, params=V1_PARAMS, outcome_params=V1_OUTCOME_PARAMS,
+                    )
+                except Exception as exc:  # pragma: no cover -- failure path
+                    self.fail(f"{name} raised {exc!r}")
+                self.assertEqual(len(upper), 1)
+                self.assertEqual(len(lower), 1)
+
+                try:
+                    u, l = rs.process_symbol_counts_only_both_bounds(
+                        "AAA", df, spy, scan_dates, V1_PARAMS, V1_OUTCOME_PARAMS, "V1",
+                    )
+                except Exception as exc:  # pragma: no cover -- failure path
+                    self.fail(f"{name} raised {exc!r}")
+                self.assertEqual(len(u), 1)
+                self.assertEqual(len(l), 1)
 
 
 class TestResolvedDate(unittest.TestCase):
@@ -1021,6 +1164,285 @@ class TestDeterminismAndResumeIO(unittest.TestCase):
         self.assertEqual(rc, 0)
         resumed_summary = rs.main.last_summary
         self.assertEqual(resumed_summary, full_summary)
+
+
+def _immediate_future(fn, *args):
+    """A REAL concurrent.futures.Future, already resolved -- as_completed()
+    inspects Future-internal attributes (_condition, _state), so a mere
+    duck-typed stand-in won't work; this must be the genuine class, just
+    run synchronously in-process instead of in a worker. Used by
+    _FakeExecutor below for a fast, fully deterministic CI stand-in for a
+    real process pool."""
+    import concurrent.futures
+    future = concurrent.futures.Future()
+    try:
+        result = fn(*args)
+    except BaseException as exc:  # noqa: BLE001 -- mirrors a worker crash
+        future.set_exception(exc)
+    else:
+        future.set_result(result)
+    return future
+
+
+class _FakeExecutor:
+    """Synchronous stand-in for ProcessPoolExecutor: submit() runs the
+    worker function immediately in-process and returns an already-resolved
+    REAL Future (see _immediate_future). Fast, deterministic, no OS process
+    spawn -- the default CI regression guard for the >1 orchestration logic
+    in _run_pool(). Note: real concurrent.futures.as_completed() iterates
+    its input as a *set*, so this executor cannot control the order
+    _run_pool() observes completions in -- tests that need a specific
+    order patch replay_setups.as_completed directly instead (see
+    test_workers_write_in_sorted_symbol_order_despite_out_of_order_completion
+    and test_worker_crash_leaves_no_partial_symbol_and_resume_retries_it)."""
+
+    def __init__(self, max_workers=1, raise_for_symbol=None):
+        self.max_workers = max_workers
+        self._raise_for_symbol = raise_for_symbol
+        self.submitted = []  # [(symbol, future), ...] in submission order
+
+    def submit(self, fn, task):
+        if self._raise_for_symbol is not None and task.get("symbol") == self._raise_for_symbol:
+            def _crash():
+                raise RuntimeError("worker crash")
+            future = _immediate_future(_crash)
+        else:
+            future = _immediate_future(fn, task)
+        self.submitted.append((task["symbol"], future))
+        return future
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
+
+    def __call__(self, max_workers=1):
+        # executor_factory(max_workers=N) construction pattern.
+        return self
+
+
+class TestWorkersPoolIO(unittest.TestCase):
+    """--workers N: a process pool for the CPU-bound process_symbol work.
+    Default workers=1 is the exact sequential behavior (same code path);
+    these tests cover the >1 orchestration logic via an injected
+    executor_factory, plus one real ProcessPoolExecutor run proving actual
+    cross-process pickling and Windows-spawn-safety."""
+
+    def _setup(self, out_dir, symbols=("AAA", "BBB", "CCC")):
+        symbols_file = out_dir / "symbols.txt"
+        symbols_file.write_text("\n".join(symbols) + "\n")
+        frames = {s: _fixed_frame("2026-05-01", "2026-06-10", 100.0) for s in symbols}
+        frames["SPY"] = SPY_WIDE
+        return symbols_file, frames
+
+    def _argv(self, out_dir, symbols_file, workers=1, extra=None):
+        argv = [
+            "--symbols-file", str(symbols_file), "--start", "2026-06-01", "--end", "2026-06-05",
+            "--output", str(out_dir / "run.db"), "--cache-dir", str(out_dir / "cache"),
+            "--counts-only", "--workers", str(workers),
+        ]
+        return argv + (extra or [])
+
+    def _candidate_rows(self, db_path):
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT variant, bound, symbol, scan_date, regime, accepted, reason_code "
+            "FROM replay_candidates ORDER BY variant, bound, symbol, scan_date"
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def test_workers_default_matches_sequential_baseline(self):
+        out_dir1, out_dir2 = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
+        symbols_file1, frames = self._setup(out_dir1)
+        symbols_file2, _ = self._setup(out_dir2)
+        argv_default = [
+            "--symbols-file", str(symbols_file1), "--start", "2026-06-01", "--end", "2026-06-05",
+            "--output", str(out_dir1 / "run.db"), "--cache-dir", str(out_dir1 / "cache"), "--counts-only",
+        ]
+        argv_workers_1 = self._argv(out_dir2, symbols_file2, workers=1)
+        rc1 = rs.main(argv_default, downloader=_fake_downloader(frames))
+        rc2 = rs.main(argv_workers_1, downloader=_fake_downloader(frames))
+        self.assertEqual(rc1, 0)
+        self.assertEqual(rc2, 0)
+        self.assertEqual(self._candidate_rows(out_dir1 / "run.db"), self._candidate_rows(out_dir2 / "run.db"))
+
+    def test_workers_two_matches_workers_one_fake_pool(self):
+        out_dir1, out_dir2 = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
+        symbols_file1, frames = self._setup(out_dir1)
+        symbols_file2, _ = self._setup(out_dir2)
+        rc1 = rs.main(self._argv(out_dir1, symbols_file1, workers=1), downloader=_fake_downloader(frames))
+        rc2 = rs.main(
+            self._argv(out_dir2, symbols_file2, workers=2),
+            downloader=_fake_downloader(frames), executor_factory=_FakeExecutor(),
+        )
+        self.assertEqual(rc1, 0)
+        self.assertEqual(rc2, 0)
+        self.assertEqual(self._candidate_rows(out_dir1 / "run.db"), self._candidate_rows(out_dir2 / "run.db"))
+
+    def test_workers_two_matches_workers_one_real_pool(self):
+        out_dir1, out_dir2 = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
+        symbols_file1, frames = self._setup(out_dir1, symbols=("AAA", "BBB"))
+        symbols_file2, _ = self._setup(out_dir2, symbols=("AAA", "BBB"))
+        rc1 = rs.main(self._argv(out_dir1, symbols_file1, workers=1), downloader=_fake_downloader(frames))
+        rc2 = rs.main(self._argv(out_dir2, symbols_file2, workers=2), downloader=_fake_downloader(frames))
+        self.assertEqual(rc1, 0)
+        self.assertEqual(rc2, 0)
+        self.assertEqual(self._candidate_rows(out_dir1 / "run.db"), self._candidate_rows(out_dir2 / "run.db"))
+
+    def test_workers_write_in_sorted_symbol_order_despite_out_of_order_completion(self):
+        from unittest.mock import patch
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, frames = self._setup(out_dir, symbols=("AAA", "BBB", "CCC"))
+        fake = _FakeExecutor()
+
+        def _reversed_as_completed(futures_dict):
+            # real as_completed() iterates its input as a *set* -- order is
+            # not under our control there, so force a specific (reversed-
+            # submission) order here instead, to prove _run_pool()'s own
+            # sorted-prefix buffering handles out-of-order completion.
+            return list(reversed(list(futures_dict)))
+
+        with patch("replay_setups.as_completed", side_effect=_reversed_as_completed):
+            rc = rs.main(self._argv(out_dir, symbols_file, workers=3),
+                         downloader=_fake_downloader(frames), executor_factory=fake)
+        self.assertEqual(rc, 0)
+        self.assertEqual([s for s, _ in fake.submitted], ["AAA", "BBB", "CCC"])  # submitted in sorted order
+        conn = sqlite3.connect(out_dir / "run.db")
+        rows = conn.execute(
+            "SELECT symbol, completed_at FROM replay_progress ORDER BY completed_at"
+        ).fetchall()
+        conn.close()
+        self.assertEqual([r[0] for r in rows], ["AAA", "BBB", "CCC"])  # sorted order, despite reversed completion
+
+    def test_worker_crash_leaves_no_partial_symbol_and_resume_retries_it(self):
+        from unittest.mock import patch
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, frames = self._setup(out_dir, symbols=("AAA", "BBB"))
+        fake = _FakeExecutor(raise_for_symbol="BBB")
+
+        def _submission_order_as_completed(futures_dict):
+            return list(futures_dict)  # AAA (resolves fine) before BBB (crashes)
+
+        with patch("replay_setups.as_completed", side_effect=_submission_order_as_completed):
+            with self.assertRaises(RuntimeError):
+                rs.main(self._argv(out_dir, symbols_file, workers=2),
+                        downloader=_fake_downloader(frames), executor_factory=fake)
+
+        conn = sqlite3.connect(out_dir / "run.db")
+        run_id = conn.execute("SELECT run_id FROM replay_runs").fetchone()[0]
+        done = {r[0] for r in conn.execute("SELECT symbol FROM replay_progress WHERE status='done'")}
+        conn.close()
+        self.assertEqual(done, {"AAA"})  # BBB never committed
+
+        rc = rs.main(
+            self._argv(out_dir, symbols_file, workers=1, extra=["--resume-run-id", str(run_id)]),
+            downloader=_fake_downloader(frames),
+        )
+        self.assertEqual(rc, 0)
+        conn = sqlite3.connect(out_dir / "run.db")
+        done_after = {r[0] for r in conn.execute("SELECT symbol FROM replay_progress WHERE status='done'")}
+        conn.close()
+        self.assertEqual(done_after, {"AAA", "BBB"})
+
+    def test_ctrl_c_during_pool_shuts_down_promptly(self):
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, frames = self._setup(out_dir, symbols=("AAA", "BBB"))
+
+        shutdown_calls = []
+
+        class _KeyboardInterruptExecutor(_FakeExecutor):
+            def submit(self, fn, task):
+                raise KeyboardInterrupt()
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                shutdown_calls.append((wait, cancel_futures))
+
+        fake = _KeyboardInterruptExecutor()
+        with self.assertRaises(KeyboardInterrupt):
+            rs.main(self._argv(out_dir, symbols_file, workers=2),
+                    downloader=_fake_downloader(frames), executor_factory=fake)
+        self.assertIn((False, True), shutdown_calls)  # cancel_futures=True, called before re-raise
+        self.assertIn((True, False), shutdown_calls)  # the final wait=True shutdown in `finally`
+
+    def test_workers_flag_recorded_but_excluded_from_resume_check(self):
+        out_dir = Path(tempfile.mkdtemp())
+        symbols_file, frames = self._setup(out_dir, symbols=("AAA",))
+        output_path = out_dir / "run.db"
+        rc = rs.main(self._argv(out_dir, symbols_file, workers=1), downloader=_fake_downloader(frames))
+        self.assertEqual(rc, 0)
+        conn = sqlite3.connect(output_path)
+        run_id, recorded_workers = conn.execute("SELECT run_id, workers FROM replay_runs").fetchone()
+        conn.close()
+        self.assertEqual(recorded_workers, 1)
+
+        rc2 = rs.main(
+            self._argv(out_dir, symbols_file, workers=4, extra=["--resume-run-id", str(run_id)]),
+            downloader=_fake_downloader(frames),
+        )
+        self.assertEqual(rc2, 0)  # resume_run() does not raise despite workers 1 -> 4
+        conn = sqlite3.connect(output_path)
+        still_recorded = conn.execute("SELECT workers FROM replay_runs WHERE run_id=?", (run_id,)).fetchone()[0]
+        conn.close()
+        self.assertEqual(still_recorded, 1)  # left as originally recorded, not updated to 4
+
+    def test_worker_entrypoint_regime_matches_parent_build_regime_by_date(self):
+        out_dir = Path(tempfile.mkdtemp())
+        cache_dir = out_dir / "cache"
+        start, end = date(2026, 5, 1), date(2026, 6, 10)
+        frame = _fixed_frame("2026-04-01", "2026-06-15", 100.0)
+        spy = _fixed_frame("2026-04-01", "2026-06-15", 400.0)
+        rs.save_to_cache(cache_dir, "AAA", frame, start, end)
+        rs.save_to_cache(cache_dir, "SPY", spy, start, end)
+        scan_dates = rs.build_scan_dates(spy, date(2026, 6, 1), date(2026, 6, 5))
+
+        task = {
+            "symbol": "AAA", "cache_dir": str(cache_dir),
+            "warmup_start": str(start), "fetch_end": str(end),
+            "scan_dates": [str(d) for d in scan_dates], "mode": "counts_only", "variants": ["V1"],
+            "params_by_variant": {"V1": rs.asdict(rs.V1_PARAMS)},
+            "outcome_params": rs.asdict(rs.V1_OUTCOME_PARAMS),
+        }
+        result = rs._worker_process_symbol_variants(task)
+
+        expected_regime = build_regime_by_date(spy, scan_dates)
+        rows = result["rows"]["V1"][rs.UPPER]
+        for row in rows:
+            self.assertEqual(row.regime, expected_regime[row.scan_date])
+
+    def test_worker_entrypoint_has_no_downloader_parameter(self):
+        import inspect
+        sig = inspect.signature(rs._worker_process_symbol_variants)
+        self.assertEqual(list(sig.parameters), ["task"])
+
+    def test_opening_old_schema_db_without_workers_column_adds_it(self):
+        out_dir = Path(tempfile.mkdtemp())
+        db_path = out_dir / "run.db"
+        # Pre-change schema: replay_runs WITHOUT the workers column.
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE replay_runs (
+                run_id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL,
+                completed_at TEXT, mode TEXT NOT NULL, variants_json TEXT NOT NULL,
+                git_commit TEXT, params_json TEXT NOT NULL, outcome_params_json TEXT NOT NULL,
+                universe_hash TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL,
+                fetch_end_date TEXT NOT NULL, library_versions_json TEXT,
+                preregistration_file_hash TEXT, status TEXT NOT NULL DEFAULT 'started'
+            )
+        """)
+        conn.execute(
+            "INSERT INTO replay_runs (started_at, mode, variants_json, params_json, "
+            "outcome_params_json, universe_hash, start_date, end_date, fetch_end_date) "
+            "VALUES ('2026-01-01T00:00:00+00:00', 'counts_only', '[]', '{}', '{}', 'h', "
+            "'2026-01-01', '2026-01-01', '2026-01-01')"
+        )
+        conn.commit()
+        conn.close()
+
+        conn = rs.open_results_db(db_path)
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(replay_runs)").fetchall()}
+        self.assertIn("workers", columns)
+        recorded = conn.execute("SELECT workers FROM replay_runs").fetchone()[0]
+        conn.close()
+        self.assertEqual(recorded, 1)  # existing rows default to the single-process value they actually ran with
 
 
 class TestUniverseSources(unittest.TestCase):

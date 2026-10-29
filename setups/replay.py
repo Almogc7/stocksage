@@ -258,3 +258,157 @@ def run_replay_core(
             rows.append(row)
 
     return rows
+
+
+@dataclass
+class _RawVerdict:
+    """One scan_date's suppression-independent raw verdict for one symbol.
+
+    evaluate_candidate() and define_setup() (setups/evaluate.py,
+    setups/definition.py) take no suppression-state argument -- both are
+    pure functions of (df_full, scan_date, spy_df, params) only. They never
+    read blocked_until or seen_identities, which live purely in
+    run_replay_core's own loop body. So the expensive half of counts-only
+    mode (this verdict) is safe to compute exactly ONCE per scan_date and
+    reuse for both the UPPER and LOWER bound -- only the cheap suppression/
+    dedupe bookkeeping below (_replay_suppression) differs per bound.
+    """
+    scan_date: date
+    regime: str
+    eval_passed: bool
+    eval_reason_code: str | None
+    outcome: object | None  # Rejection | SetupDefinition | None
+
+
+def _compute_raw_verdicts(
+    df_full: pd.DataFrame,
+    spy_df: pd.DataFrame,
+    scan_dates: list[date],
+    params: SetupParams,
+    regime_by_date: dict,
+) -> list[_RawVerdict]:
+    """The expensive half of counts-only mode, run once per scan_date --
+    mirrors run_replay_core's own evaluate_candidate()/define_setup() calls
+    (lines above) but omits the blocked_until/seen_identities suppression
+    logic entirely, since that's independent of this per-date verdict."""
+    out: list[_RawVerdict] = []
+    for scan_date in scan_dates:
+        regime = regime_by_date[scan_date]
+        eval_result = evaluate_candidate(df_full, scan_date, scan_date)
+        if not eval_result.passed:
+            out.append(_RawVerdict(scan_date, regime, False, eval_result.reason_code, None))
+            continue
+        outcome = define_setup(df_full, scan_date, spy_df, params)
+        out.append(_RawVerdict(scan_date, regime, True, None, outcome))
+    return out
+
+
+def _replay_suppression(
+    symbol: str,
+    variant: str,
+    verdicts: list[_RawVerdict],
+    counts_only_block_extra_sessions: int,
+) -> list[CandidateRow]:
+    """The cheap second pass: replays run_replay_core's own
+    blocked_until/seen_identities state machine over cached raw verdicts
+    instead of recomputing evaluate_candidate()/define_setup(). Must stay
+    byte-for-byte equivalent to run_replay_core's counts-only branch (lines
+    177-178, 183-218, 251-256) -- tests/test_setups_replay.py's
+    TestCountsOnlySinglePassEquivalence enforces this as a permanent
+    regression guard."""
+    rows: list[CandidateRow] = []
+    blocked_until: date | None = None
+    seen_identities: set[tuple] = set()
+
+    for v in verdicts:
+        scan_date = v.scan_date
+        regime = v.regime
+
+        if blocked_until is not None and scan_date < blocked_until:
+            rows.append(CandidateRow(
+                symbol=symbol, scan_date=scan_date, regime=regime,
+                accepted=False, reason_code=SUPPRESSED, variant=variant,
+            ))
+            continue
+
+        if not v.eval_passed:
+            rows.append(CandidateRow(
+                symbol=symbol, scan_date=scan_date, regime=regime,
+                accepted=False, reason_code=v.eval_reason_code, variant=variant,
+            ))
+            continue
+
+        outcome = v.outcome
+        if isinstance(outcome, Rejection):
+            rows.append(CandidateRow(
+                symbol=symbol, scan_date=scan_date, regime=outcome.regime,
+                accepted=False, reason_code=outcome.reason_code, variant=variant,
+                trigger=outcome.trigger, stop=outcome.stop, target=outcome.target,
+                risk=outcome.risk, rr=outcome.rr, atr=outcome.atr,
+            ))
+            continue
+
+        identity = (symbol, outcome.sh_date, outcome.sl_date)
+        if identity in seen_identities:
+            rows.append(CandidateRow(
+                symbol=symbol, scan_date=scan_date, regime=outcome.regime,
+                accepted=False, reason_code=DUPLICATE_SETUP, variant=variant,
+                setup_identity=identity,
+            ))
+            continue
+        seen_identities.add(identity)
+
+        rows.append(CandidateRow(
+            symbol=symbol, scan_date=scan_date, regime=outcome.regime,
+            accepted=True, reason_code=None, variant=variant,
+            setup_identity=identity,
+            sh_date=outcome.sh_date, sh_price=outcome.sh_price,
+            sl_date=outcome.sl_date, sl_price=outcome.sl_price,
+            trigger=outcome.trigger, stop=outcome.stop, target=outcome.target,
+            risk=outcome.risk, rr=outcome.rr, atr=outcome.atr,
+            validity_end=outcome.validity_end,
+            target_source=outcome.target_source,
+        ))
+
+        if counts_only_block_extra_sessions > 0:
+            blocked_until = advance_us_trading_days(
+                outcome.validity_end, counts_only_block_extra_sessions
+            )
+        else:
+            blocked_until = outcome.validity_end
+
+    return rows
+
+
+def run_replay_core_counts_only_both_bounds(
+    frames: dict[str, pd.DataFrame],
+    spy_df: pd.DataFrame,
+    scan_dates: list[date],
+    params: SetupParams = V1_PARAMS,
+    outcome_params: OutcomeParams = V1_OUTCOME_PARAMS,
+    variant: str = "V1",
+    regime_by_date: dict | None = None,
+) -> tuple[list[CandidateRow], list[CandidateRow]]:
+    """Counts-only (compute_outcomes=False) UPPER+LOWER for every symbol in
+    `frames`, running evaluate_candidate()/define_setup() exactly ONCE per
+    (symbol, scan_date) instead of once per bound as run_replay_core's own
+    counts-only branch does when called twice. Returns (upper_rows,
+    lower_rows), each equal in content and order to what
+    run_replay_core(..., compute_outcomes=False, counts_only_block_extra_sessions=0)
+    and
+    run_replay_core(..., counts_only_block_extra_sessions=outcome_params.timeout_sessions)
+    would have returned if called separately. Never calls
+    simulate_outcome() -- for --run-outcomes, use run_replay_core(compute_outcomes=True)
+    directly, unchanged; that path is already single-pass."""
+    if regime_by_date is None:
+        regime_by_date = build_regime_by_date(spy_df, scan_dates)
+
+    upper_rows: list[CandidateRow] = []
+    lower_rows: list[CandidateRow] = []
+    for symbol in sorted(frames.keys()):
+        verdicts = _compute_raw_verdicts(frames[symbol], spy_df, scan_dates, params, regime_by_date)
+        upper_rows.extend(_replay_suppression(symbol, variant, verdicts, 0))
+        lower_rows.extend(
+            _replay_suppression(symbol, variant, verdicts, outcome_params.timeout_sessions)
+        )
+    return upper_rows, lower_rows
