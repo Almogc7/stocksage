@@ -1502,6 +1502,50 @@ successfully, found nothing" apart from "didn't run."
 
 ---
 
+## 13c. Result of the confirmatory replay (pre-registration V1)
+
+**Verdict: FAIL** (label: CONFIRMATORY). Full report:
+`docs/CONFIRMATORY_REPORT_SETUPS_V1.md`.
+
+- 697 primary trades, 250 distinct symbols, 52 distinct fill months, 6
+  calendar years.
+- Mean net R of the setups (all primary trades, unfiltered): **-0.1246**.
+- Mean paired difference (setup R minus mechanics-matched peer control):
+  **-0.1684**, 95% month-cluster bootstrap interval **[-0.3018, -0.0277]**
+  (10,000 draws, seed 20261029) — the lower bound is below 0.
+- Positive paired difference in only 1 of 6 qualifying periods
+  (2023; 2021/2022/2024/2025/2026 all negative).
+- Win rate: 34.9%.
+- 1,836 accepted setups total, of which 538 were INVALIDATED_BEFORE_FILL,
+  445 EXPIRED_UNFILLED, and 156 CHASE_RR_BELOW_3 (not trades, per §12/§6 of
+  the pre-registration).
+
+FAIL per the pre-registration's own decision rule (§7): conditions 2, 3,
+and 4 all failed (mean net R not greater than 0; bootstrap lower bound not
+greater than 0; positive in fewer than 4 of the qualifying periods), while
+conditions 1 and 5 held — this is a clean FAIL, not an INCONCLUSIVE.
+
+**Commits**: code freeze `39e3edba542d5c2b61ba5d1eabf0b501d05d73c2`,
+pre-registration `8c54cc1`, pre-run correction `74c6a9d`.
+
+**SHA256** (from the archived confirmatory run,
+`archive_confirmatory_v1/SHA256SUMS.txt`):
+- `confirmatory_report.md`:
+  `319a6958f31888cb16c7e45f1a2ef3a3c0fd71f57ad2546c6314ce73aac65d4a`
+- results DB (`confirmatory_run.db`):
+  `38479392781551cf06b5500a79c33f012346b5df3be2082195cdbf60869c18f4`
+
+**Consequences (pre-registration §11, FAIL branch)**: nothing from this
+replay is wired into the bot. No rule is tuned on this data. Any new setup
+rule is a new version with its own pre-registration, judged only on data
+that did not exist at the time that new pre-registration is written.
+
+This verdict is recorded here as required by the pre-registration's own
+integrity rule (§12 item 7: "The report is saved unmodified, and its
+verdict is recorded in docs/SETUP_SPEC.md whatever it is").
+
+---
+
 ## 14. Rollout
 
 1. **PR 0 — split into three independent PRs**, each separately mergeable:
@@ -1605,6 +1649,60 @@ replay harness itself) for diffing two results DBs' `replay_candidates`
 tables column-by-column, used as the hand-run acceptance check that a
 speed change produced byte-identical output against the baseline on the
 same cache.
+
+**Scope note (control builder + statistics PR): milestone 5c tooling,
+built and tested on synthetic data only.** `setups/analysis.py` (pure)
+implements `docs/PREREGISTRATION_SETUPS_V1.md` sections 6-8 and the
+section-13 clarifications added before freeze: a mechanics-matched peer
+control per primary trade (synthetic `SetupDefinition` sized to the real
+trade's own ATR-multiples, reusing `simulate_outcome()` unmodified), the
+month-cluster bootstrap, and `decide()`'s five-condition PASS/FAIL/
+INCONCLUSIVE rule. `scripts/analyze_replay.py` (I/O) is the confirmatory
+pipeline: reads an existing `--run-outcomes` results DB read-only, never
+trusts its stored outcome columns (§13.5 — `OutcomeResult.status` is
+never actually persisted there; every accepted row's authoritative
+outcome is recomputed against the same price cache and compared against
+the stored fields), and labels its own report CONFIRMATORY only when
+every §13.6 condition holds (frozen variant/slippage/seed/draws, the
+pre-registration file committed in git HEAD, a clean working tree,
+matching library versions, cache-vs-manifest sha256 match, zero
+stored-vs-recomputed mismatches) — otherwise EXPLORATORY, naming every
+failed condition. The `--peer-counts-only` diagnostic (§7's ambiguity
+over "fill-eve" peer counts when no outcome has been computed) is its own
+script, `scripts/peer_counts.py`, kept structurally separate so it can
+never influence the confirmatory label. Per the ordering agreed for this
+PR: this code (and its tests, synthetic data only) is committed BEFORE
+`docs/PREREGISTRATION_SETUPS_V1.md` is frozen and committed, with that
+file's `FREEZE_COMMIT` field naming this commit — the §14 gate applies to
+running `--run-outcomes` and to opening real outcome results, not to
+writing and testing code against synthetic data.
+
+**Scope note (pre-freeze hardening): real process pool + scale rehearsal,
+still synthetic data only.** Two checks added before freeze, neither found
+a bug: (1) a test running `scripts/analyze_replay.py`'s full pipeline
+under a REAL `ProcessPoolExecutor` (`--workers 2`, Windows spawn — not the
+fake in-process pool the rest of the `--workers` test suite uses) on the
+small synthetic end-to-end fixture, asserting the report is byte-identical
+to `--workers 1`; proves `_pass1_worker`/`_pass2_worker`/`_pass3_worker`
+are genuinely picklable top-level functions and that spawn re-importing
+the module changes nothing. (2) A one-off, throwaway, uncommitted
+rehearsal script (run outside the repo, deleted afterward) built a
+~120-symbol synthetic universe over ~1500 sessions and ran the real
+`--run-outcomes --variants V3 --workers 8` replay followed by
+`scripts/analyze_replay.py --workers 8` with the frozen parameters, through
+a disposable temp git repo with every CONFIRMATORY gate satisfied.
+Results: replay stage ~340s, analysis stage ~410s (~750s total on this
+machine, with other work running concurrently — expect less in isolation);
+4,680 accepted setups, 1,223 primary trades with usable peer controls,
+~110 eligible peers per trade on average (this synthetic universe's
+symbols mostly trend together, so eligibility is high); peak main-process
+working set ~266MB (workers' own memory isn't included); label
+**CONFIRMATORY with an empty `failed_conditions` list** (asserted); the
+confirmatory `decide()` verdict itself came out FAIL on this synthetic,
+no-real-edge universe, which is an expected and acceptable outcome at
+rehearsal scale — the rehearsal checks the PIPELINE runs correctly and
+reports CONFIRMATORY correctly at this scale, not that a manufactured edge
+should be found.
 
 **Scope note: `OutcomeResult` gains `resolved_date`.** The outcome module
 (§12) now also returns the date as of which a setup/position is

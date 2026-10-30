@@ -329,3 +329,26 @@ Also completed:
   `_base_result()` — callers receive the last close, not the live price they
   passed in. Ticketed for a future cleanup pass; the composite engine does
   not consume that key.
+
+## Autonomy rules (how to work in this repo)
+
+- One task = one branch from origin/main. Never work on main. Never merge. Never push to main.
+- Allowed without asking: edit files, run the test suite with the pinned venv
+  (~/venvs/stocksage-replay), commit locally, push the feature branch.
+- Never: touch the server or ssh, open db/stocksage.db or any real results DB, run
+  scripts/replay_setups.py --run-outcomes on real data (tests may run it on synthetic data
+  with a fake downloader and temp directories), edit docs/PREREGISTRATION_*, change
+  requirements.txt unless the task says so, or leave stray files inside the repo (caches,
+  outputs, results databases, reports; tests must write only to temp directories outside
+  it). New source, test and doc files that belong to the task are fine, and must be
+  committed or deleted before the task ends, because the confirmatory run needs a clean tree.
+- Stop and ask only for: a decision that changes trading rules, parameters or the
+  pre-registration; anything that would touch main or production; an ambiguity that
+  changes results.
+- Review: before reporting, have the independent-reviewer subagent review the diff against
+  origin/main. Fix confirmed bugs, list the rest.
+- Finish every task with this report, in this order: branch, files changed (diff stat),
+  test count (before and after), what changed per item, open risks, and the exact commands
+  the human must run next (merge, server checks, cleanup).
+- Weekday merges: tell the human not to merge between 16:27 and 16:57 Israel time (the
+  morning scan fires at 16:35 and a restart then can repeat it).
