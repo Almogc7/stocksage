@@ -658,14 +658,31 @@ def win_rate_and_r_stats(rows: list) -> dict:
     }
 
 
-def rejection_shares(classified_counts: dict, no_peer_count: int) -> dict:
+def rejection_shares(classified_counts: dict, no_peer_count: int, total_accepted: int) -> dict:
     """classified_counts: {status: count} for every accepted row's
     recomputed status (not_trade + excluded statuses). no_peer_count:
     trades excluded in §6 for < MIN_PEERS usable peers -- tracked
-    separately since it's a §7-stage exclusion, not an outcome status."""
-    total = sum(classified_counts.values()) + no_peer_count
-    if total == 0:
-        return {}
-    shares = {status: count / total for status, count in classified_counts.items()}
-    shares["no_peer"] = no_peer_count / total
-    return shares
+    separately since it's a §7-stage exclusion, not an outcome status.
+    total_accepted: every accepted=1 row for the run, regardless of
+    classification (§8 report review: the denominator must always be
+    explicit -- a share "within the rejected/excluded bucket" reads very
+    differently from a share "of all accepted setups," and both are
+    genuinely useful, so both are always returned, separately labeled,
+    never just one silently presented as "the" share)."""
+    bucket_total = sum(classified_counts.values()) + no_peer_count
+
+    within_bucket = {}
+    if bucket_total > 0:
+        within_bucket = {status: count / bucket_total for status, count in classified_counts.items()}
+        within_bucket["no_peer"] = no_peer_count / bucket_total
+
+    of_all_accepted = {}
+    if total_accepted > 0:
+        of_all_accepted = {status: count / total_accepted for status, count in classified_counts.items()}
+        of_all_accepted["no_peer"] = no_peer_count / total_accepted
+
+    return {
+        "total_accepted": total_accepted,
+        "within_rejected_excluded_bucket": within_bucket,
+        "of_all_accepted_setups": of_all_accepted,
+    }

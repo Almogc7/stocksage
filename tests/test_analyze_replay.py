@@ -373,6 +373,37 @@ class TestReportTextForRejectionBreakdown(unittest.TestCase):
         self.assertIn("no-peer excluded count", text)
         self.assertNotIn("sector", text.lower())
 
+    def test_every_section_8_share_states_both_denominators_explicitly(self):
+        # Owner review: a bare percentage invites misreading "share
+        # within the rejected bucket" as "share of all accepted setups"
+        # -- every count in section 8 must now spell out BOTH, labeled.
+        repo = _make_temp_git_repo(with_preregistration=True)
+        out_dir = Path(tempfile.mkdtemp())
+        db_path, cache_dir, symbols, frames = _build_run_outcomes_db(out_dir, repo, n_symbols=25)
+        argv = ["--results-db", str(db_path), "--cache-dir", str(cache_dir),
+                "--output", str(out_dir / "report.md")]
+        rc = ar.main(argv, repo_root=repo, version_lookup=lambda n: "1.0.0")
+        self.assertEqual(rc, 0)
+        text = (out_dir / "report.md").read_text()
+
+        self.assertIn("total accepted setups:", text)
+        self.assertIn("of all", text)
+        self.assertIn("accepted setups", text)
+        self.assertIn("within the rejected/excluded/no-peer bucket", text)
+
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        total_accepted = conn.execute(
+            "SELECT COUNT(*) FROM replay_candidates WHERE bound='NA' AND accepted=1"
+        ).fetchone()[0]
+        conn.close()
+        self.assertIn(f"total accepted setups: {total_accepted}", text)
+
+        # The raw rejection_shares() dict is printed too -- confirm it
+        # carries the new, explicitly-labeled nested shape, not the old
+        # flat "share of something unstated" dict.
+        self.assertIn("within_rejected_excluded_bucket", text)
+        self.assertIn("of_all_accepted_setups", text)
+
 
 class TestPass3FrameCache(unittest.TestCase):
 

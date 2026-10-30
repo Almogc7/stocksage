@@ -307,7 +307,8 @@ def _fmt(x, pct=False):
 def build_report(
     label, run_row, repo_root, args, header_slippage_bps, sufficiency, unfiltered_mean_r,
     bootstrap, per_period, concentration, decision, no_peer_excluded_count,
-    not_trade_status_count, excluded_status_count, recompute_mismatches, manifest_mismatches,
+    not_trade_status_count, excluded_status_count, total_accepted,
+    recompute_mismatches, manifest_mismatches,
     by_target_source_table, by_year_table, by_regime_table, win_stats,
     rejection_shares_table, secondary_bootstrap, secondary_decision,
 ) -> str:
@@ -375,20 +376,28 @@ def build_report(
     lines.append("")
 
     lines.append("## Section 8 — non-confirmatory (descriptive only, never fed to decide())\n")
-    total_for_shares = sum(not_trade_status_count.values()) + sum(excluded_status_count.values()) + no_peer_excluded_count
+    # Every share below states its denominator explicitly (owner review:
+    # a share "within the rejected/excluded bucket" reads very
+    # differently from a share "of all accepted setups," and a bare
+    # unlabeled percentage invites misreading one as the other).
+    bucket_total = sum(not_trade_status_count.values()) + sum(excluded_status_count.values()) + no_peer_excluded_count
+    lines.append(f"- total accepted setups: {total_accepted}\n")
+
+    def _share_pair(count):
+        of_all = (count / total_accepted) if total_accepted else 0.0
+        within = (count / bucket_total) if bucket_total else 0.0
+        return f"{count} ({of_all:.2%} of all {total_accepted} accepted setups; {within:.2%} within the rejected/excluded/no-peer bucket)"
+
     lines.append("- not-trade counts by status (invalidated/expired/chase-rejected):")
     for status in (INVALIDATED_BEFORE_FILL, EXPIRED_UNFILLED, CHASE_RR_BELOW_3):
         count = not_trade_status_count.get(status, 0)
-        share = (count / total_for_shares) if total_for_shares else 0.0
-        lines.append(f"  - {status}: {count} ({share:.2%})")
+        lines.append(f"  - {status}: {_share_pair(count)}")
     lines.append("- excluded counts by status (DATA_GAP/OPEN_AT_END):")
     for status in (DATA_GAP, OPEN_AT_END):
         count = excluded_status_count.get(status, 0)
-        share = (count / total_for_shares) if total_for_shares else 0.0
-        lines.append(f"  - {status}: {count} ({share:.2%})")
-    no_peer_share = (no_peer_excluded_count / total_for_shares) if total_for_shares else 0.0
-    lines.append(f"- no-peer excluded count: {no_peer_excluded_count} ({no_peer_share:.2%})")
-    lines.append(f"- rejection/exclusion shares (raw): {rejection_shares_table}")
+        lines.append(f"  - {status}: {_share_pair(count)}")
+    lines.append(f"- no-peer excluded count: {_share_pair(no_peer_excluded_count)}")
+    lines.append(f"- rejection/exclusion shares (raw, both denominators labeled): {rejection_shares_table}")
     lines.append(f"- win rate / R stats: {win_stats}")
     lines.append(f"- by target_source: {by_target_source_table}")
     lines.append(f"- by year: {by_year_table}")
@@ -610,14 +619,15 @@ def main(
          "mae_r": t["mae_r"], "mfe_r": t["mfe_r"]}
         for t in primary_trades
     ]
+    total_accepted = len(accepted_rows)
     report = build_report(
         label, run_row, repo_root, args, header_slippage_bps, sufficiency, unfiltered_mean_r,
         bootstrap, per_period, concentration, decision, no_peer_excluded_count,
-        not_trade_status_count, excluded_status_count,
+        not_trade_status_count, excluded_status_count, total_accepted,
         recompute_mismatches, manifest_mismatches,
         by_target_source(all_primary_dict_rows), by_year(all_primary_dict_rows),
         by_regime(all_primary_dict_rows), win_rate_and_r_stats(all_primary_dict_rows),
-        rejection_shares({**not_trade_status_count, **excluded_status_count}, no_peer_excluded_count),
+        rejection_shares({**not_trade_status_count, **excluded_status_count}, no_peer_excluded_count, total_accepted),
         secondary_bootstrap, secondary_decision,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -562,11 +562,32 @@ class TestRobustness(unittest.TestCase):
     def test_excluded_trade_accounting_matches_reported_shares(self):
         classified_counts = {EXPIRED_UNFILLED: 10, INVALIDATED_BEFORE_FILL: 5, DATA_GAP: 2}
         no_peer_count = 3
-        shares = sa.rejection_shares(classified_counts, no_peer_count)
-        total = sum(classified_counts.values()) + no_peer_count
-        self.assertAlmostEqual(sum(shares.values()), 1.0, places=9)
-        self.assertAlmostEqual(shares["no_peer"], no_peer_count / total, places=9)
-        self.assertAlmostEqual(shares[EXPIRED_UNFILLED], 10 / total, places=9)
+        bucket_total = sum(classified_counts.values()) + no_peer_count
+
+        # Within-bucket denominator (rejected + excluded + no-peer only).
+        result = sa.rejection_shares(classified_counts, no_peer_count, total_accepted=bucket_total)
+        within = result["within_rejected_excluded_bucket"]
+        self.assertAlmostEqual(sum(within.values()), 1.0, places=9)
+        self.assertAlmostEqual(within["no_peer"], no_peer_count / bucket_total, places=9)
+        self.assertAlmostEqual(within[EXPIRED_UNFILLED], 10 / bucket_total, places=9)
+
+        # Of-all-accepted denominator: a much larger total (e.g. plenty
+        # of primary trades with usable peers too) -> shares must be
+        # smaller than the within-bucket ones and must NOT sum to 1.
+        total_accepted = bucket_total + 100
+        result2 = sa.rejection_shares(classified_counts, no_peer_count, total_accepted=total_accepted)
+        of_all = result2["of_all_accepted_setups"]
+        self.assertEqual(result2["total_accepted"], total_accepted)
+        self.assertAlmostEqual(of_all["no_peer"], no_peer_count / total_accepted, places=9)
+        self.assertAlmostEqual(of_all[EXPIRED_UNFILLED], 10 / total_accepted, places=9)
+        self.assertLess(sum(of_all.values()), 1.0)
+        self.assertLess(of_all["no_peer"], within["no_peer"])
+
+    def test_rejection_shares_handles_zero_total_accepted_without_dividing_by_zero(self):
+        result = sa.rejection_shares({}, 0, total_accepted=0)
+        self.assertEqual(result["total_accepted"], 0)
+        self.assertEqual(result["within_rejected_excluded_bucket"], {})
+        self.assertEqual(result["of_all_accepted_setups"], {})
 
 
 # ── §13.5 fix: resolved_date skipped when recomputed is None ─────────────
