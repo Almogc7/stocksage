@@ -1606,6 +1606,33 @@ tables column-by-column, used as the hand-run acceptance check that a
 speed change produced byte-identical output against the baseline on the
 same cache.
 
+**Scope note (control builder + statistics PR): milestone 5c tooling,
+built and tested on synthetic data only.** `setups/analysis.py` (pure)
+implements `docs/PREREGISTRATION_SETUPS_V1.md` sections 6-8 and the
+section-13 clarifications added before freeze: a mechanics-matched peer
+control per primary trade (synthetic `SetupDefinition` sized to the real
+trade's own ATR-multiples, reusing `simulate_outcome()` unmodified), the
+month-cluster bootstrap, and `decide()`'s five-condition PASS/FAIL/
+INCONCLUSIVE rule. `scripts/analyze_replay.py` (I/O) is the confirmatory
+pipeline: reads an existing `--run-outcomes` results DB read-only, never
+trusts its stored outcome columns (§13.5 — `OutcomeResult.status` is
+never actually persisted there; every accepted row's authoritative
+outcome is recomputed against the same price cache and compared against
+the stored fields), and labels its own report CONFIRMATORY only when
+every §13.6 condition holds (frozen variant/slippage/seed/draws, the
+pre-registration file committed in git HEAD, a clean working tree,
+matching library versions, cache-vs-manifest sha256 match, zero
+stored-vs-recomputed mismatches) — otherwise EXPLORATORY, naming every
+failed condition. The `--peer-counts-only` diagnostic (§7's ambiguity
+over "fill-eve" peer counts when no outcome has been computed) is its own
+script, `scripts/peer_counts.py`, kept structurally separate so it can
+never influence the confirmatory label. Per the ordering agreed for this
+PR: this code (and its tests, synthetic data only) is committed BEFORE
+`docs/PREREGISTRATION_SETUPS_V1.md` is frozen and committed, with that
+file's `FREEZE_COMMIT` field naming this commit — the §14 gate applies to
+running `--run-outcomes` and to opening real outcome results, not to
+writing and testing code against synthetic data.
+
 **Scope note: `OutcomeResult` gains `resolved_date`.** The outcome module
 (§12) now also returns the date as of which a setup/position is
 definitively closed — `exit_date` for a resolved trade, `fill_date` for
