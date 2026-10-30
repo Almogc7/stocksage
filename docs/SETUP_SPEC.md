@@ -1502,6 +1502,50 @@ successfully, found nothing" apart from "didn't run."
 
 ---
 
+## 13c. Result of the confirmatory replay (pre-registration V1)
+
+**Verdict: FAIL** (label: CONFIRMATORY). Full report:
+`docs/CONFIRMATORY_REPORT_SETUPS_V1.md`.
+
+- 697 primary trades, 250 distinct symbols, 52 distinct fill months, 6
+  calendar years.
+- Mean net R of the setups (all primary trades, unfiltered): **-0.1246**.
+- Mean paired difference (setup R minus mechanics-matched peer control):
+  **-0.1684**, 95% month-cluster bootstrap interval **[-0.3018, -0.0277]**
+  (10,000 draws, seed 20261029) — the lower bound is below 0.
+- Positive paired difference in only 1 of 6 qualifying periods
+  (2023; 2021/2022/2024/2025/2026 all negative).
+- Win rate: 34.9%.
+- 1,836 accepted setups total, of which 538 were INVALIDATED_BEFORE_FILL,
+  445 EXPIRED_UNFILLED, and 156 CHASE_RR_BELOW_3 (not trades, per §12/§6 of
+  the pre-registration).
+
+FAIL per the pre-registration's own decision rule (§7): conditions 2, 3,
+and 4 all failed (mean net R not greater than 0; bootstrap lower bound not
+greater than 0; positive in fewer than 4 of the qualifying periods), while
+conditions 1 and 5 held — this is a clean FAIL, not an INCONCLUSIVE.
+
+**Commits**: code freeze `39e3edba542d5c2b61ba5d1eabf0b501d05d73c2`,
+pre-registration `8c54cc1`, pre-run correction `74c6a9d`.
+
+**SHA256** (from the archived confirmatory run,
+`archive_confirmatory_v1/SHA256SUMS.txt`):
+- `confirmatory_report.md`:
+  `319a6958f31888cb16c7e45f1a2ef3a3c0fd71f57ad2546c6314ce73aac65d4a`
+- results DB (`confirmatory_run.db`):
+  `38479392781551cf06b5500a79c33f012346b5df3be2082195cdbf60869c18f4`
+
+**Consequences (pre-registration §11, FAIL branch)**: nothing from this
+replay is wired into the bot. No rule is tuned on this data. Any new setup
+rule is a new version with its own pre-registration, judged only on data
+that did not exist at the time that new pre-registration is written.
+
+This verdict is recorded here as required by the pre-registration's own
+integrity rule (§12 item 7: "The report is saved unmodified, and its
+verdict is recorded in docs/SETUP_SPEC.md whatever it is").
+
+---
+
 ## 14. Rollout
 
 1. **PR 0 — split into three independent PRs**, each separately mergeable:
