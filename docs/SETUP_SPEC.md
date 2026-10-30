@@ -1633,6 +1633,33 @@ file's `FREEZE_COMMIT` field naming this commit — the §14 gate applies to
 running `--run-outcomes` and to opening real outcome results, not to
 writing and testing code against synthetic data.
 
+**Scope note (pre-freeze hardening): real process pool + scale rehearsal,
+still synthetic data only.** Two checks added before freeze, neither found
+a bug: (1) a test running `scripts/analyze_replay.py`'s full pipeline
+under a REAL `ProcessPoolExecutor` (`--workers 2`, Windows spawn — not the
+fake in-process pool the rest of the `--workers` test suite uses) on the
+small synthetic end-to-end fixture, asserting the report is byte-identical
+to `--workers 1`; proves `_pass1_worker`/`_pass2_worker`/`_pass3_worker`
+are genuinely picklable top-level functions and that spawn re-importing
+the module changes nothing. (2) A one-off, throwaway, uncommitted
+rehearsal script (run outside the repo, deleted afterward) built a
+~120-symbol synthetic universe over ~1500 sessions and ran the real
+`--run-outcomes --variants V3 --workers 8` replay followed by
+`scripts/analyze_replay.py --workers 8` with the frozen parameters, through
+a disposable temp git repo with every CONFIRMATORY gate satisfied.
+Results: replay stage ~340s, analysis stage ~410s (~750s total on this
+machine, with other work running concurrently — expect less in isolation);
+4,680 accepted setups, 1,223 primary trades with usable peer controls,
+~110 eligible peers per trade on average (this synthetic universe's
+symbols mostly trend together, so eligibility is high); peak main-process
+working set ~266MB (workers' own memory isn't included); label
+**CONFIRMATORY with an empty `failed_conditions` list** (asserted); the
+confirmatory `decide()` verdict itself came out FAIL on this synthetic,
+no-real-edge universe, which is an expected and acceptable outcome at
+rehearsal scale — the rehearsal checks the PIPELINE runs correctly and
+reports CONFIRMATORY correctly at this scale, not that a manufactured edge
+should be found.
+
 **Scope note: `OutcomeResult` gains `resolved_date`.** The outcome module
 (§12) now also returns the date as of which a setup/position is
 definitively closed — `exit_date` for a resolved trade, `fill_date` for

@@ -513,6 +513,34 @@ class TestWorkersPoolIO(unittest.TestCase):
 
         self.assertEqual(diffs1, diffs2)
 
+    def test_workers_two_with_the_real_process_pool_matches_workers_one(self):
+        """Pre-freeze hardening: a REAL ProcessPoolExecutor (default
+        executor_factory, no fake pool) on Windows uses spawn, which
+        re-imports this module in each worker process -- the only way to
+        actually prove _pass1_worker/_pass2_worker/_pass3_worker are
+        genuinely picklable top-level functions and that spawn doesn't
+        silently change any result. Same fixture, same db/cache, two
+        separate --output paths so the only difference between the runs
+        is --workers itself -- the report text must be byte-identical."""
+        repo = _make_temp_git_repo(with_preregistration=True)
+        out_dir = Path(tempfile.mkdtemp())
+        db_path, cache_dir, symbols, frames = _build_run_outcomes_db(out_dir, repo, n_symbols=25)
+
+        argv1 = ["--results-db", str(db_path), "--cache-dir", str(cache_dir),
+                 "--output", str(out_dir / "report_w1.md"), "--workers", "1"]
+        rc1 = ar.main(argv1, repo_root=repo, version_lookup=lambda n: "1.0.0")
+        self.assertEqual(rc1, 0)
+
+        argv2 = ["--results-db", str(db_path), "--cache-dir", str(cache_dir),
+                 "--output", str(out_dir / "report_w2.md"), "--workers", "2"]
+        rc2 = ar.main(argv2, repo_root=repo, version_lookup=lambda n: "1.0.0")  # real ProcessPoolExecutor
+        self.assertEqual(rc2, 0)
+
+        self.assertEqual(
+            (out_dir / "report_w1.md").read_text(),
+            (out_dir / "report_w2.md").read_text(),
+        )
+
 
 class TestHardRuleNoRealDb(unittest.TestCase):
 
